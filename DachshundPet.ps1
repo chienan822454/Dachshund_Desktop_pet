@@ -1,6 +1,6 @@
 ﻿#requires -Version 5.1
 # =============================================================================
-# 臘腸狗桌寵 V1.7.2 - 旺旺, a dachshund desktop pet (low-risk edition)
+# 臘腸狗桌寵 V1.7.3 - 旺旺, a dachshund desktop pet (low-risk edition)
 #   Made from Fighter V24.7: only the dachshund is kept.
 #   * Offline only: this program contains no network code.
 #   * Writes only into its own folder, and only when something goes wrong
@@ -15,7 +15,7 @@
 # =============================================================================
 param([switch]$Classic)
 $ErrorActionPreference = 'Stop'
-$script:appTitle = '臘腸狗桌寵 V1.7.2（旺旺）'
+$script:appTitle = '臘腸狗桌寵 V1.7.3（旺旺）'
 try { $Host.UI.RawUI.WindowTitle = '旺旺（臘腸狗桌寵）- 關閉這個視窗會結束旺旺' } catch { }
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -570,6 +570,29 @@ function Get-SwatchImage([string]$folder) {
     } catch {
         return $null
     }
+}
+
+function Show-OutfitSwatch($g, [string]$id, [double]$right, [double]$centerY, [int]$rowHeight, [double]$minLeft) {
+    # Draws the outfit's fabric swatch (with a thin grey frame), right-aligned at $right and centred on $centerY.
+    $swb = $script:outfitSwatches[$id]
+    if ($null -eq $swb) { return $false }
+    $h = [Math]::Max(8, $rowHeight - 6)
+    $w = [int][Math]::Round($h * 1.8)
+    $x = [int][Math]::Round($right) - $w
+    if ($x -lt $minLeft) { $x = [int][Math]::Round($minLeft) }
+    $y = [int][Math]::Round($centerY - $h / 2.0)
+    $state = $g.Save()
+    try {
+        $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+        $g.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::Half
+        $g.DrawImage($swb, [System.Drawing.Rectangle]::new($x, $y, $w, $h))
+        $g.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::Default
+        $edge = [System.Drawing.Pen]::new([System.Drawing.Color]::FromArgb(140, 140, 140), 1)
+        try { $g.DrawRectangle($edge, $x, $y, $w - 1, $h - 1) } finally { $edge.Dispose() }
+    } finally {
+        $g.Restore($state)
+    }
+    return $true
 }
 
 function Test-OutfitReady([string]$folder) {
@@ -1145,6 +1168,7 @@ try {
     # After each name: a small piece of that outfit's fabric, drawn where a shortcut key would be shown.
     $script:outfitSwatches = @{}
     $script:swatchGap = ([string][char]0x3000) * 4
+    $script:swatchViaRenderer = $false
     foreach ($oi in $script:outfitList) {
         $outfitItem = New-Object System.Windows.Forms.ToolStripMenuItem([string]$oi[1])
         $outfitItem.Tag = [string]$oi[0]
@@ -1158,6 +1182,14 @@ try {
             param($sender, $e)
             try { Set-DogOutfit ([string]$sender.Tag) } catch { $null = Write-ErrorLog ('換衣服錯誤：' + $_.ToString()) }
         })
+        $outfitItem.Add_Paint({
+            param($sender, $e)
+            try {
+                if (-not $script:swatchViaRenderer) {
+                    [void](Show-OutfitSwatch $e.Graphics ([string]$sender.Tag) ($sender.Width - 24) ($sender.Height / 2.0) $sender.Height 0)
+                }
+            } catch { }
+        })
         [void]$miOutfit.DropDownItems.Add($outfitItem)
         $script:outfitMenuItems += $outfitItem
     }
@@ -1168,23 +1200,15 @@ try {
                 param($sender, $e)
                 try {
                     if ([string]$e.Text -ne $script:swatchGap) { return }
-                    $swb = $script:outfitSwatches[[string]$e.Item.Tag]
-                    if ($null -eq $swb) { return }
                     $r = $e.TextRectangle
-                    $h = [Math]::Max(8, [Math]::Min($r.Height, $e.Item.Height) - 6)
-                    $w = [int][Math]::Round($h * 1.8)
-                    $x = $r.Right - $w - 2
-                    if ($x -lt $r.Left) { $x = $r.Left }
-                    $y = $r.Top + [int][Math]::Floor(($r.Height - $h) / 2.0)
-                    $g = $e.Graphics
-                    $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
-                    $g.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::Half
-                    $g.DrawImage($swb, [System.Drawing.Rectangle]::new($x, $y, $w, $h))
-                    $edge = [System.Drawing.Pen]::new([System.Drawing.Color]::FromArgb(140, 140, 140), 1)
-                    try { $g.DrawRectangle($edge, $x, $y, $w - 1, $h - 1) } finally { $edge.Dispose() }
+                    if (Show-OutfitSwatch $e.Graphics ([string]$e.Item.Tag) ($r.Right - 2) ($r.Top + $r.Height / 2.0) $e.Item.Height $r.Left) {
+                        $script:swatchViaRenderer = $true
+                    }
                 } catch { }
             })
-            $miOutfit.DropDown.Renderer = $swatchRenderer
+            # Submenus that Windows creates by itself always use the main menu's renderer, so it goes on the main menu.
+            # It looks the same as the default; it only adds the swatches to the outfit names.
+            $cms.Renderer = $swatchRenderer
         } catch {
             $null = Write-ErrorLog ('衣服色塊無法顯示：' + $_.ToString())
         }
