@@ -1,6 +1,6 @@
 ﻿#requires -Version 5.1
 # =============================================================================
-# 臘腸狗桌寵 V1.6.1 - 旺旺, a dachshund desktop pet (low-risk edition)
+# 臘腸狗桌寵 V1.6.2 - 旺旺, a dachshund desktop pet (low-risk edition)
 #   Made from Fighter V24.7: only the dachshund is kept.
 #   * Offline only: this program contains no network code.
 #   * Writes only into its own folder, and only when something goes wrong
@@ -15,7 +15,7 @@
 # =============================================================================
 param([switch]$Classic)
 $ErrorActionPreference = 'Stop'
-$script:appTitle = '臘腸狗桌寵 V1.6.1（旺旺）'
+$script:appTitle = '臘腸狗桌寵 V1.6.2（旺旺）'
 try { $Host.UI.RawUI.WindowTitle = '旺旺（臘腸狗桌寵）- 關閉這個視窗會結束旺旺' } catch { }
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -522,7 +522,7 @@ function Import-DogPictures {
     if ($blinkFrames.Count -eq 3) { $script:dogBlinkFrames = $blinkFrames }
     # Extra poses: head tilt, sniffing, lying down, sleeping, play bow, crouch, yawn, sitting.
     $script:dogPoses = @{}
-    foreach ($pn in @('tilt_00', 'tilt_01', 'sniff_00', 'sniff_01', 'lie_00', 'sleep_00', 'bow_00', 'crouch_00', 'sidesleep_00', 'belly_00', 'yawn_00', 'sit_00', 'flat_00', 'curl_00', 'bed_00')) {
+    foreach ($pn in @('tilt_00', 'tilt_01', 'sniff_00', 'sniff_01', 'lie_00', 'sleep_00', 'bow_00', 'crouch_00', 'sidesleep_00', 'belly_00', 'yawn_00', 'sit_00', 'flat_00', 'curl_00', 'bed_00', 'shake_00', 'shake_01', 'shake_02', 'shake_03')) {
         $pp = Get-OutfitPicture ('dachshund_3d_' + $pn + '.png')
         if ($null -ne $pp) { $script:dogPoses[$pn] = $pp }
     }
@@ -719,7 +719,7 @@ function Set-PetSize([int]$size) {
 $script:dogActionSpec = @{
     tilt  = @{ Len = 40;  Poses = @('tilt_00', 'tilt_01');   Say = @('汪？', '嗯？', '你在說什麼？') }
     sniff = @{ Len = 50;  Poses = @('sniff_00', 'sniff_01'); Say = @('嗅嗅…', '好像有好吃的味道', '聞聞看～') }
-    shake = @{ Len = 18;  Poses = @('tilt_00', 'tilt_01');   Say = @('甩甩～') }
+    shake = @{ Len = 17;  Poses = @('shake_00', 'shake_01', 'shake_02', 'shake_03'); Say = @('甩甩～') }
     look  = @{ Len = 40;  Poses = @();                        Say = @('咦？', '') }
     bow   = @{ Len = 30;  Poses = @('bow_00');                Say = @('伸懶腰～') }
     lie   = @{ Len = 160; Poses = @('lie_00');                Say = @('趴一下～', '好舒服～', '趴著吹風～') }
@@ -798,9 +798,10 @@ function Start-DogSleep([bool]$manual, [string]$style = '', [bool]$night = $fals
     $script:dogActTick = 0
     # First a yawn, then turning around on the spot (like a real dog), then lying down.
     $script:dogSleepYawn = 0
-    if ($script:dogPoses.ContainsKey('yawn_00')) { $script:dogSleepYawn = 34 }
+    if ($script:dogPoses.ContainsKey('yawn_00')) { $script:dogSleepYawn = 22 }
+    # One quick turn when sent to bed from the menu, a little longer for a nap of its own.
     $circleTicks = 0
-    if ($script:dogWalkFrames.Count -eq 4) { $circleTicks = 40 }
+    if ($script:dogWalkFrames.Count -eq 4) { $circleTicks = if ($manual) { 10 } else { 18 } }
     $script:dogSleepPre = $script:dogSleepYawn + $circleTicks
     # A nap lasts 1 to 2 minutes; from the menu, or at night, it sleeps until woken (night: until 7:00).
     $script:dogActLen = if ($manual -or $night) { 0 } else { $script:dogSleepPre + $script:rng.Next(1000, 2000) }
@@ -852,8 +853,12 @@ function Get-DogFramePath {
             return $null
         }
         'shake' {
-            $shakePoses = @('tilt_00', 'tilt_01')
-            return $script:dogPoses[$shakePoses[$t % 2]]
+            # Head shake: the head rolls from side to side (with a little motion blur), then settles.
+            $shakeSeq = @('', 'shake_00', 'shake_01', 'shake_00', 'shake_02', 'shake_03', 'shake_02', 'shake_00', 'shake_01',
+                'shake_00', 'shake_02', 'shake_03', 'shake_02', 'shake_00', 'shake_02', '', '')
+            $k = [string]$shakeSeq[[Math]::Min($t, $shakeSeq.Count - 1)]
+            if ([string]::IsNullOrEmpty($k)) { return $null }
+            return $script:dogPoses[$k]
         }
         'sniff' {
             if ($t -lt 3 -or $t -ge ($script:dogActLen - 3)) { return $script:dogPoses['sniff_00'] }
@@ -1416,7 +1421,8 @@ try {
                 $t = $script:dogActTick
                 switch ($script:dogAct) {
                     'shake' {
-                        $xOffset = if (($t % 2) -eq 0) { -3 } else { 3 }
+                        # Only the head moves.
+                        $xOffset = 0
                         $yOffset = 0
                     }
                     'sleep' {
@@ -1424,8 +1430,8 @@ try {
                         if ($pre -lt 0 -and $t -ge $script:dogSleepYawn) {
                             # Turning around before lying down: steps on the spot, facing one way, then the other.
                             $c = $t - $script:dogSleepYawn
-                            if (($c % 10) -eq 0) { $script:facingLeft = -not $script:facingLeft }
-                            $xOffset = [int]([Math]::Sin($c / 3.2) * 5)
+                            if (($c % 8) -eq 0) { $script:facingLeft = -not $script:facingLeft }
+                            $xOffset = [int]([Math]::Sin($c / 3.2) * 2)
                             $yOffset = @(-2, 0, -2, -2, 0, -2)[$t % 6]
                         } else {
                             # Slow breathing, and a Zzz now and then.

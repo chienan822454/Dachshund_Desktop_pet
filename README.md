@@ -42,8 +42,8 @@
 | `DIAG_Dachshund.cmd` | 診斷模式（視窗會一直開著並顯示錯誤） |
 | `START_Dachshund_Classic.cmd` | 用原本的顯示方式（沒有平滑邊緣）啟動，新顯示方式看不到旺旺時用 |
 | `DachshundPet.ps1` | 程式本體 |
-| `dachshund_3d_*.png` | 不穿衣服的 28 張圖（姿勢和表情） |
-| `clothes/` | 五件衣服（blue_bear、happy_dino、red_vest、camo_jacket、olive_vest），每件 28 張圖 |
+| `dachshund_3d_*.png` | 不穿衣服的 32 張圖（姿勢和表情） |
+| `clothes/` | 五件衣服（blue_bear、happy_dino、red_vest、camo_jacket、olive_vest），每件 32 張圖 |
 | `使用說明.txt` | 完整使用說明 |
 | `docs/preview.png` | 上面的預覽圖 |
 
