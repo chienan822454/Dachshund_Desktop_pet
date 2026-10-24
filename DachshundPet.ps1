@@ -1,6 +1,6 @@
 ﻿#requires -Version 5.1
 # =============================================================================
-# 臘腸狗桌寵 V1.7.3 - 旺旺, a dachshund desktop pet (low-risk edition)
+# 臘腸狗桌寵 V1.7.4 - 旺旺, a dachshund desktop pet (low-risk edition)
 #   Made from Fighter V24.7: only the dachshund is kept.
 #   * Offline only: this program contains no network code.
 #   * Writes only into its own folder, and only when something goes wrong
@@ -15,7 +15,8 @@
 # =============================================================================
 param([switch]$Classic)
 $ErrorActionPreference = 'Stop'
-$script:appTitle = '臘腸狗桌寵 V1.7.3（旺旺）'
+$script:appVersion = 'V1.7.4'
+$script:appTitle = '臘腸狗桌寵 ' + $script:appVersion + '（旺旺）'
 try { $Host.UI.RawUI.WindowTitle = '旺旺（臘腸狗桌寵）- 關閉這個視窗會結束旺旺' } catch { }
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -1381,6 +1382,30 @@ try {
     [void]$cms.Items.Add($miDisplay)
     $miClose = $cms.Items.Add('關閉旺旺')
     $miClose.Add_Click({ $script:form.Close() })
+    [void]$cms.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+    # About: a short description and the version number.
+    $miAbout = New-Object System.Windows.Forms.ToolStripMenuItem('關於旺旺（' + $script:appVersion + '）')
+    $miAbout.Add_Click({
+        try {
+            $nl = "`r`n"
+            $outfitCount = [Math]::Max(0, $script:outfitList.Count - 1)
+            $about = $script:appTitle + $nl + $nl +
+                '一隻住在桌面上的黑棕色臘腸狗，照著真正的旺旺畫的：' + $nl +
+                '會散步、搖尾巴、歪頭、甩甩頭、坐下、打哈欠、睡午覺，還有 ' + $outfitCount + ' 件衣服可以換。' + $nl + $nl +
+                '‧左鍵點一下：摸摸牠（睡著時會叫醒牠）' + $nl +
+                '‧左鍵拖曳：把牠抱到別的地方' + $nl +
+                '‧右鍵：叫牠做動作、睡覺、換衣服和各種設定' + $nl +
+                '‧晚上 10 點～早上 7 點會回狗窩睡覺' + $nl + $nl +
+                '不連網、不安裝任何東西、不改 Windows 設定。' + $nl +
+                '完整說明請看資料夾裡的「使用說明.txt」。' + $nl + $nl +
+                '程式位置：' + $PSScriptRoot
+            [void][System.Windows.Forms.MessageBox]::Show([System.Windows.Forms.IWin32Window]$script:form, $about, '關於旺旺',
+                [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+        } catch {
+            $null = Write-ErrorLog ('關於視窗錯誤：' + $_.ToString())
+        }
+    })
+    [void]$cms.Items.Add($miAbout)
     $pic.ContextMenuStrip = $cms
     $bubble.ContextMenuStrip = $cms
     $form.ContextMenuStrip = $cms
