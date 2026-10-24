@@ -6,16 +6,13 @@
 
 ## 在另一台電腦下載並執行
 
-> **請用 GitHub Desktop 下載（Clone），不要按網頁上的「Download ZIP」。**
-> 從瀏覽器下載的檔案會被 Windows 標記成「從網路下載」，啟動檔會拒絕執行。
-> 用 GitHub Desktop 下載的檔案沒有這個標記，可以直接執行。
-
-1. 安裝 GitHub Desktop：<https://desktop.github.com/download/>，用你的 GitHub 帳號登入。
-   （這是私人專案，別台電腦也要登入同一個帳號才看得到。）
-2. 在 GitHub Desktop 選 **File → Clone repository**，選 `Dachshund_Desktop_pet`，按 **Clone**。
-   預設會下載到「文件\GitHub\Dachshund_Desktop_pet」。
-3. 打開那個資料夾，雙擊 `START_Dachshund.cmd`，旺旺就會出現在螢幕右下角。
-4. 之後有新版本時，在 GitHub Desktop 按 **Fetch origin → Pull origin** 就會更新。
+1. 登入 GitHub（這是私人專案，要登入同一個帳號才看得到），打開這個專案的首頁。
+2. 按綠色的 **Code** 按鈕 → **Download ZIP**。這裡永遠是最新版。
+3. **先解除封鎖再解壓縮**：在下載的 ZIP 檔按右鍵 → **內容** → 勾選下方的 **解除封鎖** → **確定**。
+   從瀏覽器下載的檔案會被 Windows 標記成「從網路下載」，沒有解除封鎖的話，啟動檔會拒絕執行。
+   如果內容裡沒有「解除封鎖」（公司電腦可能不允許），請改用 OneDrive 同步的資料夾。
+4. 在 ZIP 檔按右鍵 → **全部解壓縮**，打開解壓縮出來的 `Dachshund_Desktop_pet-main` 資料夾，雙擊 `START_Dachshund.cmd`。
+5. 之後有新版本時，再下載一次 ZIP，用同樣的方式解壓縮即可。
 
 需求：Windows 10 或 11（內建的 Windows PowerShell 5.1）。不用安裝、不需要系統管理員權限。
 
@@ -27,12 +24,13 @@
   - 叫旺旺做動作（歪頭、聞聞、甩甩頭、東張西望、伸懶腰、趴一下、坐下、打哈欠）
   - 睡覺（趴著睡、側躺曬太陽、翻肚睡、攤平曬肚子、縮成一團、窩在狗窩）、叫醒旺旺
   - 換衣服（不穿衣服、藍色小熊衣、HAPPY 恐龍衣、紅色鋪棉背心、迷彩鋪棉外套、軍綠鋪棉背心）
-  - 自由走動、走動速度、追著滑鼠跑、自動汪汪叫、午睡、晚上自動睡覺（晚上10點～早上7點）、尺寸、關閉旺旺
+  - 自由走動、走動速度、追著滑鼠跑、自動汪汪叫、午睡、晚上自動睡覺（晚上10點～早上7點）、尺寸、平滑邊緣、關閉旺旺
 - 完整說明請看 [使用說明.txt](使用說明.txt)。
 
 ## 安全性
 
 - 不連網路、不安裝任何東西、不修改 Windows 設定、不需要系統管理員權限。
+- 平滑邊緣：啟動時用 Windows 內建的 .NET 編譯器在記憶體中準備顯示程式；不允許時自動改用原本的顯示方式。
 - 不繞過 PowerShell 的安全設定：電腦設定成「只允許簽署過的指令碼」或「不允許指令碼」時，程式不會執行，並說明原因。
 - 只有出錯時，才會在自己的資料夾留下 `DachshundPet_Error_*.txt` 錯誤紀錄。
 
@@ -42,6 +40,7 @@
 |---|---|
 | `START_Dachshund.cmd` | 啟動旺旺 |
 | `DIAG_Dachshund.cmd` | 診斷模式（視窗會一直開著並顯示錯誤） |
+| `START_Dachshund_Classic.cmd` | 用原本的顯示方式（沒有平滑邊緣）啟動，新顯示方式看不到旺旺時用 |
 | `DachshundPet.ps1` | 程式本體 |
 | `dachshund_3d_*.png` | 不穿衣服的 28 張圖（姿勢和表情） |
 | `clothes/` | 五件衣服（blue_bear、happy_dino、red_vest、camo_jacket、olive_vest），每件 28 張圖 |
@@ -49,6 +48,8 @@
 | `docs/preview.png` | 上面的預覽圖 |
 
 ## 無法啟動時
+
+看不到旺旺時，先試 `START_Dachshund_Classic.cmd`。
 
 雙擊 `DIAG_Dachshund.cmd`，黑色視窗會用英文說明原因並停住：
 
