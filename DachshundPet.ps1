@@ -1,6 +1,6 @@
 ﻿#requires -Version 5.1
 # =============================================================================
-# 臘腸狗桌寵 V1.7.1 - 旺旺, a dachshund desktop pet (low-risk edition)
+# 臘腸狗桌寵 V1.7.2 - 旺旺, a dachshund desktop pet (low-risk edition)
 #   Made from Fighter V24.7: only the dachshund is kept.
 #   * Offline only: this program contains no network code.
 #   * Writes only into its own folder, and only when something goes wrong
@@ -15,7 +15,7 @@
 # =============================================================================
 param([switch]$Classic)
 $ErrorActionPreference = 'Stop'
-$script:appTitle = '臘腸狗桌寵 V1.7.1（旺旺）'
+$script:appTitle = '臘腸狗桌寵 V1.7.2（旺旺）'
 try { $Host.UI.RawUI.WindowTitle = '旺旺（臘腸狗桌寵）- 關閉這個視窗會結束旺旺' } catch { }
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -550,6 +550,28 @@ function Test-NightTime {
     return ($h -ge 22 -or $h -lt 7)
 }
 
+function Get-SwatchImage([string]$folder) {
+    # clothes\<outfit>\swatch.png: a small piece of the outfit's fabric for the menu (optional).
+    if ([string]::IsNullOrEmpty($folder)) { return $null }
+    $sp = Join-Path (Join-Path $PSScriptRoot $folder) 'swatch.png'
+    if (-not (Test-Path -LiteralPath $sp)) { return $null }
+    try {
+        $ms = [System.IO.MemoryStream]::new([System.IO.File]::ReadAllBytes($sp))
+        try {
+            $img = [System.Drawing.Image]::FromStream($ms)
+            try {
+                return [System.Drawing.Bitmap]::new($img)
+            } finally {
+                $img.Dispose()
+            }
+        } finally {
+            $ms.Dispose()
+        }
+    } catch {
+        return $null
+    }
+}
+
 function Test-OutfitReady([string]$folder) {
     if ([string]::IsNullOrEmpty($folder)) { return $true }
     return [bool](Test-Path -LiteralPath (Join-Path (Join-Path $PSScriptRoot $folder) 'dachshund_3d_00.png'))
@@ -782,6 +804,10 @@ function Start-DogSleep([bool]$manual, [string]$style = '', [bool]$night = $fals
     # $style: 'sleep_00' (chin on the paws), 'sidesleep_00' (on its side), 'belly_00' (belly up),
     #         'flat_00' (flat on its side, belly out), 'curl_00' (curled up), 'bed_00' (in its dog bed), '' = random.
     if (-not ($script:dogPoses.ContainsKey('lie_00') -and $script:dogPoses.ContainsKey('sleep_00'))) { Set-Bubble '少了睡覺的圖片'; return }
+    # At night (22:00-06:59) the dachshund always goes to its dog bed, unless a style was picked from the menu.
+    if (([string]::IsNullOrEmpty($style) -or -not $script:dogPoses.ContainsKey($style)) -and ($night -or (Test-NightTime)) -and $script:dogPoses.ContainsKey('bed_00')) {
+        $style = 'bed_00'
+    }
     if ([string]::IsNullOrEmpty($style) -or -not $script:dogPoses.ContainsKey($style)) {
         # Random among the sleeping pictures that are present (chin on the paws is the favourite).
         $choices = @('sleep_00', 'sleep_00')
@@ -808,7 +834,8 @@ function Start-DogSleep([bool]$manual, [string]$style = '', [bool]$night = $fals
     $script:actionMode = 'idle'
     $script:actionTick = 0
     $script:roamMoving = $false
-    if ($night) { Set-Bubble '晚安～旺旺要睡覺了' }
+    if ($night -and $style -eq 'bed_00') { Set-Bubble '晚安～旺旺回狗窩睡覺了' }
+    elseif ($night) { Set-Bubble '晚安～旺旺要睡覺了' }
     elseif ($style -eq 'sidesleep_00') { Set-Bubble '旺旺躺下來曬太陽～' }
     elseif ($style -eq 'belly_00') { Set-Bubble '旺旺翻肚睡～' }
     elseif ($style -eq 'flat_00') { Set-Bubble '旺旺攤平曬肚子～' }
@@ -1115,9 +1142,16 @@ try {
     })
     [void]$cms.Items.Add($miWake)
     $miOutfit = New-Object System.Windows.Forms.ToolStripMenuItem('換衣服')
+    # After each name: a small piece of that outfit's fabric, drawn where a shortcut key would be shown.
+    $script:outfitSwatches = @{}
+    $script:swatchGap = ([string][char]0x3000) * 4
     foreach ($oi in $script:outfitList) {
         $outfitItem = New-Object System.Windows.Forms.ToolStripMenuItem([string]$oi[1])
         $outfitItem.Tag = [string]$oi[0]
+        $sw = Get-SwatchImage ([string]$oi[2])
+        if ($null -ne $sw) { $script:outfitSwatches[[string]$oi[0]] = $sw }
+        $outfitItem.ShortcutKeyDisplayString = $script:swatchGap
+        $outfitItem.ShowShortcutKeys = $true
         $outfitItem.Checked = ([string]$oi[0] -eq $script:outfitId)
         $outfitItem.Enabled = (Test-OutfitReady ([string]$oi[2]))
         $outfitItem.Add_Click({
@@ -1126,6 +1160,34 @@ try {
         })
         [void]$miOutfit.DropDownItems.Add($outfitItem)
         $script:outfitMenuItems += $outfitItem
+    }
+    if ($script:outfitSwatches.Count -gt 0) {
+        try {
+            $swatchRenderer = New-Object System.Windows.Forms.ToolStripProfessionalRenderer
+            $swatchRenderer.Add_RenderItemText({
+                param($sender, $e)
+                try {
+                    if ([string]$e.Text -ne $script:swatchGap) { return }
+                    $swb = $script:outfitSwatches[[string]$e.Item.Tag]
+                    if ($null -eq $swb) { return }
+                    $r = $e.TextRectangle
+                    $h = [Math]::Max(8, [Math]::Min($r.Height, $e.Item.Height) - 6)
+                    $w = [int][Math]::Round($h * 1.8)
+                    $x = $r.Right - $w - 2
+                    if ($x -lt $r.Left) { $x = $r.Left }
+                    $y = $r.Top + [int][Math]::Floor(($r.Height - $h) / 2.0)
+                    $g = $e.Graphics
+                    $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+                    $g.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::Half
+                    $g.DrawImage($swb, [System.Drawing.Rectangle]::new($x, $y, $w, $h))
+                    $edge = [System.Drawing.Pen]::new([System.Drawing.Color]::FromArgb(140, 140, 140), 1)
+                    try { $g.DrawRectangle($edge, $x, $y, $w - 1, $h - 1) } finally { $edge.Dispose() }
+                } catch { }
+            })
+            $miOutfit.DropDown.Renderer = $swatchRenderer
+        } catch {
+            $null = Write-ErrorLog ('衣服色塊無法顯示：' + $_.ToString())
+        }
     }
     [void]$cms.Items.Add($miOutfit)
     [void]$cms.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
