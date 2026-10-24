@@ -1,6 +1,6 @@
 ﻿#requires -Version 5.1
 # =============================================================================
-# 臘腸狗桌寵 V1.6.3 - 旺旺, a dachshund desktop pet (low-risk edition)
+# 臘腸狗桌寵 V1.7 - 旺旺, a dachshund desktop pet (low-risk edition)
 #   Made from Fighter V24.7: only the dachshund is kept.
 #   * Offline only: this program contains no network code.
 #   * Writes only into its own folder, and only when something goes wrong
@@ -15,7 +15,7 @@
 # =============================================================================
 param([switch]$Classic)
 $ErrorActionPreference = 'Stop'
-$script:appTitle = '臘腸狗桌寵 V1.6.3（旺旺）'
+$script:appTitle = '臘腸狗桌寵 V1.7（旺旺）'
 try { $Host.UI.RawUI.WindowTitle = '旺旺（臘腸狗桌寵）- 關閉這個視窗會結束旺旺' } catch { }
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -941,7 +941,11 @@ try {
         @('happy_dino', 'HAPPY 恐龍衣', 'clothes\happy_dino'),
         @('red_vest', '紅色鋪棉背心', 'clothes\red_vest'),
         @('camo_jacket', '迷彩鋪棉外套', 'clothes\camo_jacket'),
-        @('olive_vest', '軍綠鋪棉背心', 'clothes\olive_vest')
+        @('olive_vest', '軍綠鋪棉背心', 'clothes\olive_vest'),
+        @('knit_red', '學院風針織背心（酒紅）', 'clothes\knit_red'),
+        @('knit_green', '學院風針織背心（墨綠）', 'clothes\knit_green'),
+        @('knit_grey', '學院風針織背心（淺灰）', 'clothes\knit_grey'),
+        @('knit_camel', '學院風針織背心（焦糖）', 'clothes\knit_camel')
     )
     $script:outfitId = 'none'
     $script:outfitDir = ''

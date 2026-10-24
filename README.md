@@ -23,7 +23,7 @@
 - **右鍵選單**：
   - 叫旺旺做動作（歪頭、聞聞、甩甩頭、東張西望、伸懶腰、趴一下、坐下、打哈欠）
   - 睡覺（趴著睡、側躺曬太陽、翻肚睡、攤平曬肚子、縮成一團、窩在狗窩）、叫醒旺旺
-  - 換衣服（不穿衣服、藍色小熊衣、HAPPY 恐龍衣、紅色鋪棉背心、迷彩鋪棉外套、軍綠鋪棉背心）
+  - 換衣服（不穿衣服、藍色小熊衣、HAPPY 恐龍衣、紅色鋪棉背心、迷彩鋪棉外套、軍綠鋪棉背心、學院風針織背心：酒紅／墨綠／淺灰／焦糖）
   - 自由走動、走動速度、追著滑鼠跑、自動汪汪叫、午睡、晚上自動睡覺（晚上10點～早上7點）、尺寸、平滑邊緣、關閉旺旺
 - 完整說明請看 [使用說明.txt](使用說明.txt)。
 
@@ -43,7 +43,7 @@
 | `START_Dachshund_Classic.cmd` | 用原本的顯示方式（沒有平滑邊緣）啟動，新顯示方式看不到旺旺時用 |
 | `DachshundPet.ps1` | 程式本體 |
 | `dachshund_3d_*.png` | 不穿衣服的 32 張圖（姿勢和表情） |
-| `clothes/` | 五件衣服（blue_bear、happy_dino、red_vest、camo_jacket、olive_vest），每件 32 張圖 |
+| `clothes/` | 九件衣服（blue_bear、happy_dino、red_vest、camo_jacket、olive_vest、knit_red、knit_green、knit_grey、knit_camel），每件 32 張圖 |
 | `使用說明.txt` | 完整使用說明 |
 | `docs/preview.png` | 上面的預覽圖 |
 
