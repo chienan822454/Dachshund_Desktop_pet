@@ -1,6 +1,6 @@
 ﻿#requires -Version 5.1
 # =============================================================================
-# 臘腸狗桌寵 V1.6.2 - 旺旺, a dachshund desktop pet (low-risk edition)
+# 臘腸狗桌寵 V1.6.3 - 旺旺, a dachshund desktop pet (low-risk edition)
 #   Made from Fighter V24.7: only the dachshund is kept.
 #   * Offline only: this program contains no network code.
 #   * Writes only into its own folder, and only when something goes wrong
@@ -15,7 +15,7 @@
 # =============================================================================
 param([switch]$Classic)
 $ErrorActionPreference = 'Stop'
-$script:appTitle = '臘腸狗桌寵 V1.6.2（旺旺）'
+$script:appTitle = '臘腸狗桌寵 V1.6.3（旺旺）'
 try { $Host.UI.RawUI.WindowTitle = '旺旺（臘腸狗桌寵）- 關閉這個視窗會結束旺旺' } catch { }
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -853,7 +853,7 @@ function Get-DogFramePath {
             return $null
         }
         'shake' {
-            # Head shake: the head rolls from side to side (with a little motion blur), then settles.
+            # Head shake: the head swings from the neck from side to side (a little motion blur), then settles.
             $shakeSeq = @('', 'shake_00', 'shake_01', 'shake_00', 'shake_02', 'shake_03', 'shake_02', 'shake_00', 'shake_01',
                 'shake_00', 'shake_02', 'shake_03', 'shake_02', 'shake_00', 'shake_02', '', '')
             $k = [string]$shakeSeq[[Math]::Min($t, $shakeSeq.Count - 1)]
