@@ -1,6 +1,6 @@
 ﻿#requires -Version 5.1
 # =============================================================================
-# 臘腸狗桌寵 V1.7.5 - 旺旺, a dachshund desktop pet (low-risk edition)
+# 臘腸狗桌寵 V1.7.6 - 旺旺, a dachshund desktop pet (low-risk edition)
 #   Made from Fighter V24.7: only the dachshund is kept.
 #   * Offline only: this program contains no network code.
 #   * Writes only into its own folder, and only when something goes wrong
@@ -15,7 +15,7 @@
 # =============================================================================
 param([switch]$Classic)
 $ErrorActionPreference = 'Stop'
-$script:appVersion = 'V1.7.5'
+$script:appVersion = 'V1.7.6'
 $script:appTitle = '臘腸狗桌寵 ' + $script:appVersion + '（旺旺）'
 try { $Host.UI.RawUI.WindowTitle = '旺旺（臘腸狗桌寵）- 關閉這個視窗會結束旺旺' } catch { }
 Add-Type -AssemblyName System.Windows.Forms
@@ -754,7 +754,10 @@ function Set-PetSize([int]$size) {
     $script:baseLocation = [System.Drawing.Point]::new($centerX - [int][Math]::Floor($size / 2.0), $bottom - $size)
     $script:roamTarget = $null
     Reset-ImageCache $size
-    Set-DisplayImage (Get-WagFramePath 'idle' 0)
+    # Keep the pose it is in now (lying, sitting, sleeping ...).
+    $nowPath = Get-DogFramePath
+    if ($null -eq $nowPath) { $nowPath = Get-WagFramePath 'idle' 0 }
+    Set-DisplayImage ([string]$nowPath)
 }
 
 # -----------------------------------------------------------------------------
@@ -787,6 +790,7 @@ function Start-DogAction([string]$name, [string]$say) {
     if (-not (Test-DogAction $name)) { Set-Bubble '少了這個動作的圖片'; return }
     $spec = $script:dogActionSpec[$name]
     $script:dogSleeping = $false
+    $script:dogNightSleep = $false
     $script:dogAct = $name
     $script:dogActTick = 0
     $script:dogActLen = [int]$spec.Len
@@ -1225,7 +1229,14 @@ try {
         $script:roamEnabled = [bool]$sender.Checked
         $script:roamTarget = $null
         $script:roamPauseTicks = 0
-        if ($script:roamEnabled) { Set-Bubble '開始走動' } else { Set-Bubble '停下來了' }
+        if ($script:roamEnabled) {
+            Set-Bubble '開始走動'
+        } else {
+            # Chasing the mouse needs walking, so it stops as well.
+            $script:dogChaseMouse = $false
+            try { $script:miChase.Checked = $false } catch { }
+            Set-Bubble '停下來了'
+        }
     })
     [void]$cms.Items.Add($miRoam)
     $script:miRoam = $miRoam
@@ -1261,6 +1272,7 @@ try {
         }
     })
     [void]$cms.Items.Add($miChase)
+    $script:miChase = $miChase
     [void]$cms.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
 
     $miAuto = New-Object System.Windows.Forms.ToolStripMenuItem('自動汪汪叫')
@@ -1297,7 +1309,14 @@ try {
         param($sender, $e)
         $script:dogNapEnabled = [bool]$sender.Checked
         $script:lastInteractTick = $script:clockTick
-        if ($script:dogNapEnabled) { Set-Bubble '想睡就睡～' } else { Set-Bubble '不睡午覺了' }
+        if ($script:dogNapEnabled) {
+            Set-Bubble '想睡就睡～'
+        } elseif ($script:dogSleeping -and -not $script:dogNightSleep -and $script:dogActLen -gt 0) {
+            # It is having a nap of its own right now: wake it up.
+            Stop-DogSleep $true '不睡午覺了'
+        } else {
+            Set-Bubble '不睡午覺了'
+        }
     })
     [void]$cms.Items.Add($miNap)
     $miNight = New-Object System.Windows.Forms.ToolStripMenuItem('晚上自動睡覺（晚上10點～早上7點）')
@@ -1307,7 +1326,14 @@ try {
         param($sender, $e)
         $script:nightSleepEnabled = [bool]$sender.Checked
         $script:lastInteractTick = $script:clockTick
-        if ($script:nightSleepEnabled) { Set-Bubble '晚上會乖乖睡覺～' } else { Set-Bubble '晚上也陪你！' }
+        if ($script:nightSleepEnabled) {
+            Set-Bubble '晚上會乖乖睡覺～'
+        } elseif ($script:dogSleeping -and $script:dogNightSleep) {
+            # It is asleep for the night right now: wake it up.
+            Stop-DogSleep $true '晚上也陪你！'
+        } else {
+            Set-Bubble '晚上也陪你！'
+        }
     })
     [void]$cms.Items.Add($miNight)
     [void]$cms.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
@@ -1428,6 +1454,7 @@ try {
         if (-not $script:dragMoved) {
             # Picked up: wakes up, stops what it was doing and paddles its legs.
             $script:dogSleeping = $false
+            $script:dogNightSleep = $false
             $script:dogAct = ''
             Set-Bubble '汪！放旺旺下來～'
         }
@@ -1614,7 +1641,9 @@ try {
                 } catch {
                     $script:roamEnabled = $false
                     $script:roamMoving = $false
+                    $script:dogChaseMouse = $false
                     try { $script:miRoam.Checked = $false } catch { }
+                    try { $script:miChase.Checked = $false } catch { }
                     $null = Write-ErrorLog ('走動功能錯誤，已自動停止走動：' + $_.ToString())
                 }
             } else {
@@ -1675,12 +1704,13 @@ try {
             if ($script:tickErrors -eq 1) {
                 $null = Write-ErrorLog ('動畫錯誤：' + $_.ToString() + "`r`n" + $_.ScriptStackTrace)
             }
-            if ($script:tickErrors -eq 20) {
-                # Something keeps failing: reset to a calm state.
+            if (($script:tickErrors % 20) -eq 0) {
+                # Something keeps failing: reset to a calm state (tried again every 20 failed ticks).
                 $script:actionMode = 'idle'
                 $script:actionTick = 0
                 $script:dogAct = ''
                 $script:dogSleeping = $false
+                $script:dogNightSleep = $false
                 try { Set-Bubble '發生錯誤，已自動重設' } catch { }
             }
         }
