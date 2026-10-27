@@ -1,6 +1,6 @@
 ﻿#requires -Version 5.1
 # =============================================================================
-# 臘腸狗桌寵 V1.16.0 - 旺旺, a dachshund desktop pet (low-risk edition)
+# 臘腸狗桌寵 V1.17.0 - 旺旺, a dachshund desktop pet (low-risk edition)
 #   Made from Fighter V24.7: only the dachshund is kept.
 #   * Offline only: this program contains no network code.
 #   * Writes only into its own folder, and only when something goes wrong
@@ -20,7 +20,7 @@
 # =============================================================================
 param([switch]$Classic)
 $ErrorActionPreference = 'Stop'
-$script:appVersion = 'V1.16.0'
+$script:appVersion = 'V1.17.0'
 $script:appTitle = '臘腸狗桌寵 ' + $script:appVersion + '（旺旺）'
 try { $Host.UI.RawUI.WindowTitle = '旺旺（臘腸狗桌寵）- 關閉這個視窗會結束旺旺' } catch { }
 Add-Type -AssemblyName System.Windows.Forms
@@ -553,6 +553,71 @@ function Add-BubbleToFrame([System.Drawing.Graphics]$g, [int]$width) {
     }
 }
 
+function Add-LightsToFrame([System.Drawing.Graphics]$g, [int]$w, [int]$h) {
+    # The patrol car's light bar flashes red and blue (left half and right half take turns).
+    if ($script:outfitLights.Count -eq 0) { return }
+    $cur = [string]$script:currentImagePath
+    $m = [regex]::Match($cur, 'dachshund_3d_(.+?)\.png')
+    if (-not $m.Success) { return }
+    $pose = $m.Groups[1].Value
+    if (-not $script:outfitLights.ContainsKey($pose)) { return }
+    $r = $script:outfitLights[$pose]
+    $k = [double]$w / 768.0
+    $lx = [double]$r[0]
+    if ($script:facingLeft) { $lx = 768.0 - [double]$r[0] - [double]$r[2] }
+    $x = $lx * $k
+    $y = [double]$r[1] * $k
+    $bw = [double]$r[2] * $k
+    $bh = [double]$r[3] * $k
+    $phase = ([int][Math]::Floor($script:lightTicks / 4)) % 2
+    $red = [System.Drawing.Color]::FromArgb(255, 40, 40)
+    $blue = [System.Drawing.Color]::FromArgb(40, 110, 255)
+    $leftColor = if ($phase -eq 0) { $red } else { $blue }
+    $rightColor = if ($phase -eq 0) { $blue } else { $red }
+    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    foreach ($side in 0, 1) {
+        $c = if ($side -eq 0) { $leftColor } else { $rightColor }
+        $cx = $x + $bw * (0.27 + 0.46 * $side)
+        $cy = $y + $bh * 0.5
+        foreach ($ring in @(@(1.15, 70), @(0.75, 120), @(0.42, 215))) {
+            $rad = $bw * [double]$ring[0] * 0.5
+            $brush = [System.Drawing.SolidBrush]::new([System.Drawing.Color]::FromArgb([int]$ring[1], $c))
+            try {
+                $g.FillEllipse($brush, [single]($cx - $rad), [single]($cy - $rad * 0.75), [single]($rad * 2), [single]($rad * 1.5))
+            } finally {
+                $brush.Dispose()
+            }
+        }
+    }
+}
+
+function Get-SirenPlayer {
+    if ($null -ne $script:sirenPlayer) { return $script:sirenPlayer }
+    $wav = Join-Path $PSScriptRoot 'sounds\siren.wav'
+    if (-not (Test-Path -LiteralPath $wav)) { return $null }
+    try {
+        $p = New-Object System.Media.SoundPlayer($wav)
+        $p.Load()
+        $script:sirenPlayer = $p
+    } catch {
+        $script:sirenPlayer = $null
+        $null = Write-ErrorLog ('鳴笛聲無法播放：' + $_.ToString())
+    }
+    return $script:sirenPlayer
+}
+
+function Start-PatrolSiren([bool]$force = $false) {
+    # 警察巡邏車汪汪: the light bar flashes; the siren sounds when it is switched on (at most every 20 seconds).
+    if ($script:outfitLights.Count -eq 0) { return }
+    $script:lightTicks = [Math]::Max($script:lightTicks, 50)
+    $script:viewDirty = $true
+    if (-not $script:sirenEnabled) { return }
+    if (-not $force -and ($script:clockTick - $script:sirenLastTick) -lt 330) { return }
+    $script:sirenLastTick = $script:clockTick
+    $sp = Get-SirenPlayer
+    if ($null -ne $sp) { try { $sp.Play() } catch { } }
+}
+
 function Update-SmoothView {
     if (-not $script:smoothMode) { return }
     $script:viewDirty = $false
@@ -572,6 +637,9 @@ function Update-SmoothView {
                 $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::NearestNeighbor
                 $g.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::Half
                 $g.DrawImage($script:dogBitmap, [System.Drawing.Rectangle]::new(0, 0, $w, $h))
+            }
+            if ($script:lightTicks -gt 0 -and $null -ne $script:dogBitmap) {
+                try { Add-LightsToFrame $g $w $h } catch { $script:lightTicks = 0 }
             }
             if ($script:bubbleTicks -gt 0 -and -not [string]::IsNullOrEmpty($script:bubbleText)) {
                 Add-BubbleToFrame $g $w
@@ -674,6 +742,23 @@ function Import-DogPictures {
             'run_00', 'run_01', 'fall_00', 'rub_00', 'paw_00', 'jerky_00', 'jerky_01')) {
         $pp = Get-OutfitPicture ('dachshund_3d_' + $pn + '.png')
         if ($null -ne $pp) { $script:dogPoses[$pn] = $pp }
+    }
+    # Flashing lights (the patrol car's light bar): clothes\<id>\lights.txt = one line per picture: pose x y w h.
+    $script:outfitLights = @{}
+    if (-not [string]::IsNullOrEmpty($script:outfitDir)) {
+        $lightFile = Join-Path $script:outfitDir 'lights.txt'
+        if (Test-Path -LiteralPath $lightFile) {
+            try {
+                foreach ($ln in [System.IO.File]::ReadAllLines($lightFile)) {
+                    $parts = @($ln.Trim() -split '\s+')
+                    if ($parts.Count -ne 5) { continue }
+                    $script:outfitLights[[string]$parts[0]] = @([int]$parts[1], [int]$parts[2], [int]$parts[3], [int]$parts[4])
+                }
+            } catch {
+                $script:outfitLights = @{}
+                $null = Write-ErrorLog ('警示燈位置無法讀取：' + $_.ToString())
+            }
+        }
     }
     # Drinking, running, falling, the belly rub, the handshake and eating the jerky only with the outfit's own pictures
     # (the plain picture would take the clothes off for a moment).
@@ -1355,6 +1440,7 @@ function Invoke-DogSummon {
     if ($burst) {
         try {
             Start-GlassBurst
+            if ($script:outfitLights.Count -gt 0) { try { Start-PatrolSiren $true } catch { } }
             return
         } catch {
             $null = Write-ErrorLog ('衝出來效果錯誤：' + $_.ToString())
@@ -1368,6 +1454,10 @@ function Invoke-DogSummon {
         $script:actionTick = 0
     }
     $lines = @('汪！我在這裡～', '來了來了！', '找我嗎？汪！')
+    if ($script:outfitLights.Count -gt 0) {
+        $lines = @('喔咿喔咿～巡邏車汪汪到！', '警察汪汪來了！', '巡邏中！找我嗎？')
+        try { Start-PatrolSiren $true } catch { }
+    }
     Set-Bubble ([string]$lines[$script:rng.Next(0, $lines.Count)])
 }
 
@@ -2947,6 +3037,14 @@ function Set-PlaySetting([string]$name, [bool]$on) {
             $script:begging = $false
             if ($on) { Set-Bubble '肚子餓會跟你說喔～' } else { Set-Bubble '好，不吵著要吃的了' }
         }
+        'siren' {
+            $script:sirenEnabled = $on
+            if ($on) { Set-Bubble '穿巡邏車跑起來會喔咿喔咿～' } else { Set-Bubble '好，巡邏車只閃燈不出聲' }
+        }
+        'headpat' {
+            $script:headPatEnabled = $on
+            if ($on) { Set-Bubble '摸摸頭，旺旺會瞇眼睛享受～' } else { Set-Bubble '好，摸頭跟摸身體一樣' }
+        }
         'glass' {
             $script:glassEnabled = $on
             if ($on) { Set-Bubble '被視窗擋住時，叫我我就衝出來！' } else { Set-Bubble '好，叫我時直接跑過來' }
@@ -2983,6 +3081,7 @@ $script:dogActionSpec = @{
     bow   = @{ Len = 30;  Poses = @('bow_00');                Say = @('伸懶腰～') }
     lie   = @{ Len = 160; Poses = @('lie_00');                Say = @('趴一下～', '好舒服～', '趴著吹風～') }
     pet   = @{ Len = 40;  Poses = @();                        Say = @('好舒服～♥') }
+    headpat = @{ Len = 50; Poses = @();                       Say = @('好舒服～摸頭最棒了♥', '呼嚕～再摸一下～', '眼睛都瞇起來了～♥') }
     yawn  = @{ Len = 34;  Poses = @('yawn_00');               Say = @('哈～啊～', '好睏喔…', '打個哈欠～') }
     sit   = @{ Len = 120; Poses = @('sit_00');                Say = @('旺旺坐好了！', '乖乖坐下～', '坐下等點心～') }
     eat   = @{ Len = 90;  Poses = @('eat_00', 'eat_01', 'eat_02'); Say = @('哇！有點心！', '好香喔～', '點心！點心！') }
@@ -3381,6 +3480,16 @@ function Start-BellyRub {
     }
 }
 
+function Test-PointerOnHead {
+    # Is the mouse pointer on 旺旺's head (standing poses: the front top part of the picture)?
+    $p = $script:form.PointToClient([System.Windows.Forms.Cursor]::Position)
+    if ($script:form.Width -le 0) { return $false }
+    $fx = [double]$p.X / [double]$script:form.Width * 768.0
+    $fy = [double]$p.Y / [double]$script:form.Height * 768.0
+    if ($script:facingLeft) { $fx = 768.0 - $fx }
+    return ($fx -ge 420 -and $fx -le 720 -and $fy -ge 120 -and $fy -le 440)
+}
+
 function Invoke-DogHover {
     # The pointer touched the dachshund: a curious head tilt (at most every 10 seconds).
     if ($script:isDragging) { return }
@@ -3451,6 +3560,15 @@ function Get-DogFramePath {
             if ($script:bellyRubTicks -gt 0 -and $script:dogSleepPose -eq 'belly_00' -and $script:dogPoses.ContainsKey('rub_00')) { return $script:dogPoses['rub_00'] }
             if ($script:dogPoses.ContainsKey($script:dogSleepPose)) { return $script:dogPoses[$script:dogSleepPose] }
             return $script:dogPoses['sleep_00']
+        }
+        'headpat' {
+            # Head pat: eyes closed, enjoying it, slow happy tail wag; a happy face at the end.
+            $patSeq = @(0, 1, 2, 1)
+            $k = $patSeq[([int][Math]::Floor($t / 3)) % 4]
+            if ($t -ge ($script:dogActLen - 6) -and $script:dogHappyFrames.Count -eq 3) { return $script:dogHappyFrames[$k] }
+            if ($script:dogBlinkFrames.Count -eq 3) { return $script:dogBlinkFrames[$k] }
+            if ($script:dogWagFrames.Count -eq 3) { return $script:dogWagFrames[$k] }
+            return $null
         }
         'pet' {
             # Fast happy tail wag, tongue out when that picture is there.
@@ -3643,7 +3761,8 @@ try {
         @('lion', '小獅子裝', 'clothes\lion', 'costume'),
         @('dino', '恐龍連帽裝', 'clothes\dino', 'costume'),
         @('police', '警察汪汪', 'clothes\police', 'costume'),
-        @('patrol', '警察巡邏車汪汪', 'clothes\patrol', 'costume')
+        @('patrol', '警察巡邏車汪汪', 'clothes\patrol', 'costume'),
+        @('fire', '消防員汪汪', 'clothes\fire', 'costume')
     )
     $script:outfitId = 'none'
     $script:outfitDir = ''
@@ -3698,6 +3817,13 @@ try {
     $script:trayIcon = $null
     $script:trayTextNormal = '旺旺（點一下叫牠過來）'
     $script:glassEnabled = $true
+    $script:outfitLights = @{}
+    $script:lightTicks = 0
+    $script:sirenEnabled = $true
+    $script:sirenPlayer = $null
+    $script:sirenLastTick = -100000
+    $script:sirenRunning = $false
+    $script:headPatEnabled = $true
     $script:glassForm = $null
     $script:glassTick = -1
     $script:glassSize = 0
@@ -4358,7 +4484,7 @@ try {
     })
     [void]$cms.Items.Add($miNight)
     $miPlay = New-Object System.Windows.Forms.ToolStripMenuItem('互動設定')
-    foreach ($playInfo in @(@('離開電腦時等你、回來時迎接你', 'away'), @('滑鼠在牠面前左右晃會撲過來', 'tease'), @('滑鼠一直繞圈圈會跑過來追', 'circle'), @('肚子餓、口渴會來討吃的', 'hunger'), @('節日自動換衣服', 'holiday'), @('從右下角叫旺旺時，被視窗擋住會打破螢幕衝出來', 'glass'))) {
+    foreach ($playInfo in @(@('離開電腦時等你、回來時迎接你', 'away'), @('滑鼠在牠面前左右晃會撲過來', 'tease'), @('滑鼠一直繞圈圈會跑過來追', 'circle'), @('肚子餓、口渴會來討吃的', 'hunger'), @('節日自動換衣服', 'holiday'), @('從右下角叫旺旺時，被視窗擋住會打破螢幕衝出來', 'glass'), @('滑鼠停在頭上會瞇眼享受摸頭', 'headpat'), @('穿警察巡邏車汪汪跑起來時發出鳴笛聲（警示燈一樣會閃）', 'siren'))) {
         $playItem = New-Object System.Windows.Forms.ToolStripMenuItem([string]$playInfo[0])
         $playItem.Tag = [string]$playInfo[1]
         $playItem.CheckOnClick = $true
@@ -4751,7 +4877,7 @@ try {
 
             # 3) Actions: tilting, sniffing, shaking, lying, sleeping, petting
             # A pat or a bark takes over from a small action (not from sleeping or petting).
-            if ($script:dogAct -ne '' -and $script:dogAct -ne 'sleep' -and $script:dogAct -ne 'pet' -and $script:actionMode -ne 'idle') { $script:dogAct = '' }
+            if ($script:dogAct -ne '' -and $script:dogAct -ne 'sleep' -and $script:dogAct -ne 'pet' -and $script:dogAct -ne 'headpat' -and $script:actionMode -ne 'idle') { $script:dogAct = '' }
             if ($script:dogAct -ne '') {
                 $script:dogActTick++
                 $t = $script:dogActTick
@@ -4794,6 +4920,12 @@ try {
                     'pet' {
                         $xOffset = 0
                         $yOffset = [int]([Math]::Abs([Math]::Sin($t / 1.3)) * -6)
+                    }
+                    'headpat' {
+                        # Leans into the hand a little; keeps enjoying it while the pointer stays on the head.
+                        $xOffset = 0
+                        $yOffset = [int]([Math]::Sin($t / 4.0) * 1.5)
+                        if ($t -ge ($script:dogActLen - 8) -and $script:hovering -and (Test-PointerOnHead)) { $script:dogActTick = $script:dogActLen - 30 }
                     }
                     'eat' {
                         $xOffset = 0
@@ -5048,7 +5180,10 @@ try {
             }
             if ($script:hovering -and -not $script:isDragging -and -not $menuOpen) {
                 $script:hoverTicks++
-                if ($script:hoverTicks -eq 25 -and -not $script:dogSleeping -and $script:dogAct -ne 'eat' -and $script:dogAct -ne 'drink' -and $script:dogAct -ne 'fling' -and $script:dogAct -ne 'tease' -and $script:dogAct -ne 'fetch' -and $script:dogAct -ne 'jerky' -and -not $script:alarmRinging) { Start-DogAction 'pet' '*' }
+                $petOk = (-not $script:dogSleeping -and $script:dogAct -ne 'eat' -and $script:dogAct -ne 'drink' -and $script:dogAct -ne 'fling' -and $script:dogAct -ne 'tease' -and $script:dogAct -ne 'fetch' -and $script:dogAct -ne 'jerky' -and $script:dogAct -ne 'burst' -and -not $script:alarmRinging)
+                if ($petOk -and $script:headPatEnabled -and $script:hoverTicks -ge 14 -and $script:dogAct -ne 'headpat' -and $script:dogAct -ne 'pet' -and $script:actionMode -eq 'idle' -and (Test-PointerOnHead)) {
+                    Start-DogAction 'headpat' '*'
+                } elseif ($script:hoverTicks -eq 25 -and $petOk -and $script:dogAct -ne 'headpat') { Start-DogAction 'pet' '*' }
             }
             # 3b) Teasing: the mouse pointer swinging quickly left and right in front of the dachshund
             if ($script:teaseEnabled -and -not $script:isDragging -and -not $menuOpen) {
@@ -5149,6 +5284,21 @@ try {
                 $displayPath = Get-WagFramePath $frameMode $frameTick
             }
             Set-DisplayImage $displayPath
+
+            # 7b) 警察巡邏車汪汪: the light bar flashes while it runs (and the siren sounds when it starts running)
+            if ($script:outfitLights.Count -gt 0) {
+                $isRunning = ([string]$displayPath -match 'dachshund_3d_run_0')
+                if ($isRunning) {
+                    if (-not $script:sirenRunning) { try { Start-PatrolSiren } catch { } }
+                    $script:lightTicks = [Math]::Max($script:lightTicks, 25)
+                }
+                $script:sirenRunning = $isRunning
+            }
+            if ($script:lightTicks -gt 0) {
+                $script:lightTicks--
+                if ($script:outfitLights.Count -eq 0) { $script:lightTicks = 0 }
+                $script:viewDirty = $true
+            }
 
             # 8) Prepare one picture in the background per tick, so the first action does not stutter
             if (-not $script:isDragging -and $script:warmIndex -lt $script:warmList.Count) {
