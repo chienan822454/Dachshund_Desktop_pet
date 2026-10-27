@@ -1,6 +1,6 @@
 ﻿#requires -Version 5.1
 # =============================================================================
-# 臘腸狗桌寵 V1.19.1 - 旺旺, a dachshund desktop pet (low-risk edition)
+# 臘腸狗桌寵 V1.20.0 - 旺旺, a dachshund desktop pet (low-risk edition)
 #   Made from Fighter V24.7: only the dachshund is kept.
 #   * Offline only: this program contains no network code.
 #   * Writes only into its own folder, and only when something goes wrong
@@ -20,7 +20,7 @@
 # =============================================================================
 param([switch]$Classic)
 $ErrorActionPreference = 'Stop'
-$script:appVersion = 'V1.19.1'
+$script:appVersion = 'V1.20.0'
 $script:appTitle = '臘腸狗桌寵 ' + $script:appVersion + '（旺旺）'
 try { $Host.UI.RawUI.WindowTitle = '旺旺（臘腸狗桌寵）- 關閉這個視窗會結束旺旺' } catch { }
 Add-Type -AssemblyName System.Windows.Forms
@@ -922,7 +922,8 @@ function Step-Roam {
     }
     # When chasing the mouse, aim next to the pointer and re-aim about once a second.
     $circleChase = ($script:clockTick -lt $script:circleChaseUntil)
-    $chasing = [bool]$script:dogChaseMouse -or [bool]$script:begging -or $circleChase
+    $summonRun = ($script:clockTick -lt $script:summonRunUntil)
+    $chasing = [bool]$script:dogChaseMouse -or [bool]$script:begging -or $circleChase -or $summonRun
     if ($chasing -and ($script:clockTick % 15) -eq 0) { $script:roamTarget = $null }
     if ($null -eq $script:roamTarget) {
         $b = Get-RoamBounds
@@ -956,7 +957,7 @@ function Step-Roam {
     # Running (chasing the pointer, or coming over to ask for food or water): at least the 'fast' speed.
     if ($chasing -and (Test-RunFrames)) { $stepLen = [Math]::Max($script:roamSpeed, 5.0) * $script:dpiScale * $script:sizeRatio }
     # Running after the circling pointer: faster than walking.
-    if ($circleChase) { $stepLen = [Math]::Max($script:roamSpeed, 5.0) * 1.5 * $script:dpiScale * $script:sizeRatio }
+    if ($circleChase -or $summonRun) { $stepLen = [Math]::Max($script:roamSpeed, 5.0) * 1.5 * $script:dpiScale * $script:sizeRatio }
     if ($dist -le $stepLen) {
         # Arrived: rest 2.4 to 8.4 seconds, then pick a new spot.
         $script:baseLocation = $script:roamTarget
@@ -964,7 +965,16 @@ function Step-Roam {
         $script:roamY = [double]$script:roamTarget.Y
         $script:roamTarget = $null
         $script:roamMoving = $false
-        if ($script:begging) {
+        if ($summonRun) {
+            # Ran over after breaking out of the screen: a happy hop next to the pointer.
+            $script:summonRunUntil = 0
+            $script:roamPauseTicks = 100
+            $script:actionMode = 'happy'
+            $script:actionTick = 0
+            $arrive = @('來了來了！汪！', '找我嗎？我在這！', '汪！跑過來了～')
+            if ($script:outfitLights.Count -gt 0) { $arrive = @('巡邏車汪汪到！', '警察汪汪報到！') }
+            Set-Bubble ([string]$arrive[$script:rng.Next(0, $arrive.Count)])
+        } elseif ($script:begging) {
             # Came over to ask for food or water.
             $script:roamPauseTicks = 60
             Invoke-DogBeg
@@ -1125,37 +1135,29 @@ function Import-DotSetting {
 }
 
 function Get-DotImage([int]$size) {
-    # 旺旺's own icon (wangwang.ico, the largest picture in it) scaled to the button size, see-through around it.
+    # 旺旺's head (dot_button.png, the same picture as wangwang.ico) scaled to the button size.
     $bmp = [System.Drawing.Bitmap]::new($size, $size, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     try {
         $g.Clear([System.Drawing.Color]::Transparent)
         $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
         $g.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
-        $g.CompositingQuality = [System.Drawing.Drawing2D.CompositingQuality]::HighQuality
-        $icoPath = Join-Path $PSScriptRoot 'wangwang.ico'
         $drawn = $false
-        if (Test-Path -LiteralPath $icoPath) {
-            # Largest picture that this Windows can read (some cannot read the 256 one): 256, then 64, 48, 32.
-            foreach ($want in @(256, 64, 48, 32)) {
-                if ($drawn) { break }
-                $ico = $null
-                try {
-                    $ico = [System.Drawing.Icon]::new($icoPath, $want, $want)
-                    $icoBmp = $ico.ToBitmap()
-                    try {
-                        $g.DrawImage($icoBmp, [System.Drawing.Rectangle]::new(0, 0, $size, $size))
-                        $drawn = $true
-                    } finally {
-                        $icoBmp.Dispose()
-                    }
-                } catch { } finally {
-                    if ($null -ne $ico) { $ico.Dispose() }
-                }
+        $png = Join-Path $PSScriptRoot 'dot_button.png'
+        if (Test-Path -LiteralPath $png) {
+            $src = $null
+            try {
+                $src = [System.Drawing.Image]::FromFile($png)
+                $g.DrawImage($src, [System.Drawing.Rectangle]::new(0, 0, $size, $size))
+                $drawn = $true
+            } catch {
+                $null = Write-ErrorLog ('浮動按鈕圖片無法載入：' + $_.ToString())
+            } finally {
+                if ($null -ne $src) { $src.Dispose() }
             }
         }
         if (-not $drawn) {
-            # No icon file: a plain brown dot so the button can still be found.
+            # No picture: a plain brown dot so the button can still be found.
             $fill = [System.Drawing.SolidBrush]::new([System.Drawing.Color]::FromArgb(196, 120, 52))
             try { $g.FillEllipse($fill, 1, 1, $size - 3, $size - 3) } finally { $fill.Dispose() }
         }
@@ -1163,15 +1165,6 @@ function Get-DotImage([int]$size) {
         $g.Dispose()
     }
     return $bmp
-}
-
-function Update-DotView {
-    # Soft see-through edges where the smooth display works, otherwise the icon cut out on a colour key.
-    if ($null -eq $script:dotForm -or $null -eq $script:dotBitmap) { return }
-    if ($script:dotLayered) {
-        $code = [WangwangPet.SmoothWindow]::Show($script:dotForm.Handle, $script:dotBitmap, $script:dotForm.Left, $script:dotForm.Top)
-        if ($code -ne 0) { throw ('浮動按鈕顯示失敗，代碼 ' + $code) }
-    }
 }
 
 function Initialize-DotButton {
@@ -1186,9 +1179,8 @@ function Initialize-DotButton {
     $f.Location = $script:dotPos
     $f.Text = '旺旺浮動按鈕'
     $script:dotBitmap = Get-DotImage $size
-    $script:dotLayered = [bool]$script:smoothAvailable
-    if (-not $script:dotLayered) {
-        # Colour-key window: the icon with its soft edge cut hard, on a key colour that becomes see-through.
+    # A plain colour-key window (always works): the picture with its soft edge cut, on a key colour that becomes see-through.
+    if ($true) {
         $f.BackColor = [System.Drawing.Color]::Magenta
         $f.TransparencyKey = [System.Drawing.Color]::Magenta
         $keyed = [System.Drawing.Bitmap]::new($size, $size)
@@ -1200,6 +1192,7 @@ function Initialize-DotButton {
         } finally {
             $kg.Dispose()
         }
+        $f.BackgroundImageLayout = [System.Windows.Forms.ImageLayout]::None
         $f.BackgroundImage = $keyed
     }
     $tip = New-Object System.Windows.Forms.ToolTip
@@ -1244,7 +1237,6 @@ function Initialize-DotButton {
                 $y = [Math]::Min([Math]::Max($loc.Y, $box.Top), $box.Bottom - $sz)
                 $script:dotForm.Location = [System.Drawing.Point]::new($x, $y)
                 $script:dotPos = $script:dotForm.Location
-                try { Update-DotView } catch { }
                 Save-DotSetting
                 return
             }
@@ -1260,18 +1252,7 @@ function Set-DotButton([bool]$on, [bool]$say = $true) {
     if ($on) {
         Initialize-DotButton
         $script:dotForm.Location = $script:dotPos
-        if (-not $script:dotForm.Visible) {
-            $script:dotForm.Show()
-            if ($script:dotLayered) {
-                try {
-                    [WangwangPet.SmoothWindow]::Reset($script:dotForm.Handle)
-                    Update-DotView
-                } catch {
-                    $null = Write-ErrorLog ('浮動按鈕改用一般顯示：' + $_.ToString())
-                    $script:dotLayered = $false
-                }
-            }
-        }
+        if (-not $script:dotForm.Visible) { $script:dotForm.Show() }
         $script:dotForm.TopMost = $false
         $script:dotForm.TopMost = $true
         if ($say) { Set-Bubble '浮動按鈕出現了！右鍵點它就能開我的選單～' }
@@ -1280,6 +1261,39 @@ function Set-DotButton([bool]$on, [bool]$say = $true) {
         if ($say) { Set-Bubble '好，浮動按鈕收起來了（右鍵點我或右下角頭像可以再打開）' }
     }
     Save-DotSetting
+}
+
+function Get-PetCursor {
+    # The petting hand (pet_hand.png) as the mouse pointer on 旺旺; the normal hand when the picture is missing.
+    if ($null -ne $script:petCursor) { return $script:petCursor }
+    $script:petCursor = [System.Windows.Forms.Cursors]::Hand
+    $png = Join-Path $PSScriptRoot 'pet_hand.png'
+    if (-not (Test-Path -LiteralPath $png)) { return $script:petCursor }
+    $src = $null
+    $bmp = $null
+    try {
+        $src = [System.Drawing.Image]::FromFile($png)
+        $side = Get-Scaled 40
+        $bmp = [System.Drawing.Bitmap]::new($side, $side, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+        $g = [System.Drawing.Graphics]::FromImage($bmp)
+        try {
+            $g.Clear([System.Drawing.Color]::Transparent)
+            $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+            $g.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+            $g.DrawImage($src, [System.Drawing.Rectangle]::new(0, 0, $side, $side))
+        } finally {
+            $g.Dispose()
+        }
+        # An icon made into a pointer: the hand's middle is the spot that "touches" 旺旺.
+        $script:petCursor = [System.Windows.Forms.Cursor]::new($bmp.GetHicon())
+    } catch {
+        $script:petCursor = [System.Windows.Forms.Cursors]::Hand
+        $null = Write-ErrorLog ('撫摸的手游標無法使用，改用一般的手：' + $_.ToString())
+    } finally {
+        if ($null -ne $bmp) { $bmp.Dispose() }
+        if ($null -ne $src) { $src.Dispose() }
+    }
+    return $script:petCursor
 }
 
 function Get-TrayIcon {
@@ -1321,6 +1335,7 @@ function Get-TrayIcon {
 function Test-DogCovered {
     # Is 旺旺 behind another window? Six points on its body; two or more covered = behind.
     if (-not $script:glassAvailable -or $script:dogHidden) { return $false }
+    # Hiding behind the windows: hardly anything to check - it is behind them on purpose.
     $w = [double]$script:form.Width
     $h = [double]$script:form.Height
     $pts = New-Object 'int[]' 12
@@ -1604,9 +1619,11 @@ function Update-GlassFx {
 }
 
 function Invoke-DogSummon {
-    # From the icon at the bottom right: 旺旺 comes to the top, next to the mouse pointer (also when it was
-    # hidden behind other windows, walked off somewhere, or was hiding).
-    # Behind other windows: it breaks out of the screen (can be switched off in 互動設定).
+    # From the icon at the bottom right or the floating button: 旺旺 comes to the top, next to the mouse pointer.
+    # Behind other windows (hiding behind them, or covered by a window): the glass breaks right where 旺旺 is,
+    # it jumps out there, and then runs over to the mouse pointer (the breaking glass can be switched off in 互動設定).
+    $wasBehind = [bool]$script:dogBehind
+    if ($wasBehind) { Stop-DogBehind }
     $burst = $false
     if ($script:glassEnabled -and $script:smoothMode -and -not $script:dogHidden -and $script:glassTick -lt 0 -and $script:dogAct -ne 'burst') {
         try { $burst = Test-DogCovered } catch { $burst = $false; $null = Write-ErrorLog ('視窗檢查錯誤：' + $_.ToString()) }
@@ -1615,6 +1632,40 @@ function Invoke-DogSummon {
     if ($script:isDragging) { return }
     if ($script:dogSleeping) { Stop-DogSleep $false }
     if ($script:dogAct -eq 'fling' -or $script:dogAct -eq 'tease') { $script:dogAct = '' }
+    $script:begging = $false
+    $script:circleChaseUntil = 0
+    $script:lastInteractTick = $script:clockTick
+    if ($burst) {
+        # Out through the glass at its own spot first ...
+        $script:roamTarget = $null
+        $script:roamMoving = $false
+        $script:roamPauseTicks = 0
+        $script:form.TopMost = $true
+        $script:form.TopMost = $script:topMostWanted
+        $script:viewDirty = $true
+        try {
+            Start-GlassBurst
+            if ($script:outfitLights.Count -gt 0) { try { Start-PatrolSiren $true } catch { } }
+            # ... then it runs over to the pointer (starts when the glass is broken and it has landed).
+            $script:summonRunUntil = $script:clockTick + 40 + 300
+            return
+        } catch {
+            $null = Write-ErrorLog ('衝出來效果錯誤：' + $_.ToString())
+            Hide-GlassFx
+            if ($script:dogAct -eq 'burst') { $script:dogAct = '' }
+        }
+    }
+    if ($wasBehind) {
+        # Was hiding behind the windows but not covered right now: comes to the front and runs over.
+        $script:form.TopMost = $true
+        $script:form.TopMost = $script:topMostWanted
+        $script:roamTarget = $null
+        $script:roamPauseTicks = 0
+        $script:summonRunUntil = $script:clockTick + 300
+        $script:viewDirty = $true
+        Set-Bubble '我來了～汪！'
+        return
+    }
     $cur = [System.Windows.Forms.Cursor]::Position
     $wa = [System.Windows.Forms.Screen]::FromPoint($cur).WorkingArea
     $w = $script:form.Width
@@ -1633,34 +1684,19 @@ function Invoke-DogSummon {
     $script:roamY = [double]$script:baseLocation.Y
     $script:roamTarget = $null
     $script:roamMoving = $false
-    $script:begging = $false
-    $script:circleChaseUntil = 0
     $script:roamPauseTicks = 100
-    $script:lastInteractTick = $script:clockTick
     $script:form.Location = $script:baseLocation
     # Back on top of the other windows (switched off and on again, so Windows puts it in front once more).
-    $keepTop = [bool]$script:form.TopMost
-    $script:form.TopMost = -not $keepTop
+    $script:form.TopMost = -not $script:topMostWanted
     $script:form.TopMost = $true
-    $script:form.TopMost = $keepTop
+    $script:form.TopMost = $script:topMostWanted
     $script:viewDirty = $true
-    if ($burst) {
-        try {
-            Start-GlassBurst
-            if ($script:outfitLights.Count -gt 0) { try { Start-PatrolSiren $true } catch { } }
-            return
-        } catch {
-            $null = Write-ErrorLog ('衝出來效果錯誤：' + $_.ToString())
-            Hide-GlassFx
-            if ($script:dogAct -eq 'burst') { $script:dogAct = '' }
-            $script:form.Location = $script:baseLocation
-        }
-    }
     if ($script:dogAct -eq '' -and $script:actionMode -eq 'idle') {
         $script:actionMode = 'happy'
         $script:actionTick = 0
     }
     $lines = @('汪！我在這裡～', '來了來了！', '找我嗎？汪！')
+    if ($wasBehind) { $lines = @('我回來了！汪～', '躲貓貓結束！汪！') }
     if ($script:outfitLights.Count -gt 0) {
         $lines = @('喔咿喔咿～巡邏車汪汪到！', '警察汪汪來了！', '巡邏中！找我嗎？')
         try { Start-PatrolSiren $true } catch { }
@@ -1668,34 +1704,34 @@ function Invoke-DogSummon {
     Set-Bubble ([string]$lines[$script:rng.Next(0, $lines.Count)])
 }
 
-function Hide-Dog([int]$minutes) {
-    # $minutes = 0: hidden until it is called back.
-    if ($script:dogHidden) { return }
+function Start-DogBehind([int]$minutes) {
+    # 先躲起來: 旺旺 goes behind every window (just above the desktop) and keeps walking about back there.
+    # $minutes = 0: until it is called back.
+    if ($script:dogHidden) { Show-Dog '' }
     if ($script:alarmRinging) { Stop-AlarmRing '' }
-    $script:hiddenUntil = if ($minutes -gt 0) { (Get-Date).AddMinutes($minutes) } else { [DateTime]::MaxValue }
-    $script:dogHidden = $true
-    Hide-Jerky
-    if ($script:dogAct -eq 'fetch') { $script:dogAct = '' }
-    Hide-GlassFx
-    if ($script:dogAct -eq 'burst') { $script:dogAct = '' }
-    $script:isDragging = $false
-    $script:dragMoved = $false
-    $script:hovering = $false
-    $script:hoverTicks = 0
-    $script:bubbleTicks = 0
-    $script:bubble.Visible = $false
+    $script:behindUntil = if ($minutes -gt 0) { (Get-Date).AddMinutes($minutes) } else { [DateTime]::MaxValue }
+    $script:dogBehind = $true
+    $script:begging = $false
+    $script:circleChaseUntil = 0
+    $script:summonRunUntil = 0
+    $script:form.TopMost = $false
+    $script:form.SendToBack()
+    $script:behindTick = $script:clockTick
     $ni = Get-TrayIcon
     if ($minutes -gt 0) {
-        $ni.Text = '旺旺躲起來了，' + $script:hiddenUntil.ToString('HH:mm') + ' 回來（點一下叫牠回來）'
+        $ni.Text = '旺旺躲在視窗後面，' + $script:behindUntil.ToString('HH:mm') + ' 出來（點一下叫牠出來）'
+        Set-Bubble ('我躲到視窗後面囉！' + $script:behindUntil.ToString('HH:mm') + ' 再出來～')
     } else {
-        $ni.Text = '旺旺躲起來了（點一下叫牠回來）'
+        $ni.Text = '旺旺躲在視窗後面（點一下叫牠出來）'
+        Set-Bubble '我躲到視窗後面囉！叫我就衝出來～'
     }
-    $ni.Visible = $true
-    # Moved far outside every screen instead of hidden, so coming back never takes the keyboard focus
-    # away from the window being worked in (screen sharing only shows what is on the screens).
-    $script:form.Location = [System.Drawing.Point]::new(-25000, -25000)
-    # Nothing to animate while hidden: check once a second whether it is time to come back.
-    $script:timer.Interval = 1000
+}
+
+function Stop-DogBehind {
+    if (-not $script:dogBehind) { return }
+    $script:dogBehind = $false
+    $script:behindUntil = [DateTime]::MaxValue
+    try { $script:trayIcon.Text = $script:trayTextNormal } catch { }
 }
 
 function Show-Dog([string]$say = '旺旺回來了！') {
@@ -3296,7 +3332,7 @@ $script:dogActionSpec = @{
     spin  = @{ Len = 36;  Poses = @();                        Say = @('轉圈圈～') }
     tease = @{ Len = 70;  Poses = @('tilt_00', 'tilt_01', 'bow_00'); Say = @('咦？那是什麼？', '嗯？要跟我玩嗎？') }
     paw   = @{ Len = 74;  Poses = @('sit_00', 'paw_00');      Say = @('握手！汪！', '給你我的手手～', '握握手～好朋友！') }
-    playdead = @{ Len = 110; Poses = @('lie_00', 'belly_00'); Say = @('碰！旺旺倒下了…', '啊～被打中了…', '旺旺裝死中…') }
+    playdead = @{ Len = 110; Poses = @('lie_00', 'belly_00'); Say = @('翻肚肚～', '看我的肚子～', '旺旺翻肚了～') }
     jerky = @{ Len = 84;  Poses = @('jerky_00', 'jerky_01');  Say = @('肉乾！我的！', '咬到了～', '好香的肉乾！') }
     fetch = @{ Len = 0;   Poses = @();                        Say = @('肉乾！我來了～') }
 }
@@ -4023,6 +4059,11 @@ try {
     $script:dogHidden = $false
     $script:hiddenUntil = [DateTime]::MaxValue
     $script:trayIcon = $null
+    $script:dogBehind = $false
+    $script:behindUntil = [DateTime]::MaxValue
+    $script:behindTick = 0
+    $script:summonRunUntil = 0
+    $script:topMostWanted = $true
     $script:trayTextNormal = '旺旺（點一下叫牠過來）'
     $script:glassEnabled = $true
     $script:outfitLights = @{}
@@ -4109,7 +4150,6 @@ try {
     $script:dotForm = $null
     $script:dotTip = $null
     $script:dotBitmap = $null
-    $script:dotLayered = $false
     $script:dotMenuItems = @()
     $script:dotDown = $false
     $script:dotDragged = $false
@@ -4225,7 +4265,8 @@ try {
     $form.ShowInTaskbar = $false
     $form.BackColor = [System.Drawing.Color]::Magenta
     if (-not $script:smoothMode) { $form.TransparencyKey = [System.Drawing.Color]::Magenta }
-    $form.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $script:petCursor = $null
+    $form.Cursor = Get-PetCursor
     $form.Width = $script:petSize
     $form.Height = $script:petSize
     $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
@@ -4242,7 +4283,7 @@ try {
     $pic.Top = 0
     $pic.Width = $form.ClientSize.Width
     $pic.Height = $form.ClientSize.Height
-    $pic.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $pic.Cursor = Get-PetCursor
     $form.Controls.Add($pic)
     $script:pic = $pic
     if ($script:smoothMode) { $pic.Visible = $false }
@@ -4286,7 +4327,7 @@ try {
     }
     [void]$cms.Items.Add($miActions)
     $miTricks = New-Object System.Windows.Forms.ToolStripMenuItem('才藝表演')
-    foreach ($tr in @(@('握手', 'paw'), @('轉圈', 'spin'), @('裝死（翻肚）', 'playdead'), @('坐下', 'sit'), @('趴下', 'lie'))) {
+    foreach ($tr in @(@('握手', 'paw'), @('轉圈', 'spin'), @('翻肚', 'playdead'), @('坐下', 'sit'), @('趴下', 'lie'))) {
         $trItem = New-Object System.Windows.Forms.ToolStripMenuItem([string]$tr[0])
         $trItem.Tag = [string]$tr[1]
         $trItem.Add_Click({
@@ -4431,13 +4472,13 @@ try {
         }
     }
     [void]$cms.Items.Add($miOutfit)
-    $miHide = New-Object System.Windows.Forms.ToolStripMenuItem('先躲起來（開會、分享螢幕時）')
-    foreach ($hideInfo in @(@('15 分鐘', 15), @('30 分鐘', 30), @('1 小時', 60), @('直到我叫牠回來', 0))) {
+    $miHide = New-Object System.Windows.Forms.ToolStripMenuItem('先躲起來（躲到所有視窗後面，叫牠會打破螢幕衝出來）')
+    foreach ($hideInfo in @(@('15 分鐘', 15), @('30 分鐘', 30), @('1 小時', 60), @('直到我叫牠出來', 0))) {
         $hideItem = New-Object System.Windows.Forms.ToolStripMenuItem([string]$hideInfo[0])
         $hideItem.Tag = [int]$hideInfo[1]
         $hideItem.Add_Click({
             param($sender, $e)
-            try { Hide-Dog ([int]$sender.Tag) } catch { $null = Write-ErrorLog ('躲起來錯誤：' + $_.ToString()) }
+            try { Start-DogBehind ([int]$sender.Tag) } catch { $null = Write-ErrorLog ('躲起來錯誤：' + $_.ToString()) }
         })
         [void]$miHide.DropDownItems.Add($hideItem)
     }
@@ -4736,7 +4777,8 @@ try {
     $miTopMost.Checked = $true
     $miTopMost.Add_Click({
         param($sender, $e)
-        $script:form.TopMost = [bool]$sender.Checked
+        $script:topMostWanted = [bool]$sender.Checked
+        if (-not $script:dogBehind) { $script:form.TopMost = $script:topMostWanted }
         if ($sender.Checked) { Set-Bubble '已啟用最上層顯示' } else { Set-Bubble '已關閉最上層顯示' }
     })
     [void]$cms.Items.Add($miTopMost)
@@ -4834,7 +4876,7 @@ try {
                 '‧重力模式：只在工作列上走，抓起來放開或甩出去都會掉回工作列（往下掉時耳朵會飛起來）' + $nl +
                 '‧追滑鼠、走很快、討吃的和追繞圈圈的滑鼠時，會像真的旺旺一樣一蹦一蹦地跑' + $nl +
                 '‧翻肚睡的時候點牠的肚子：會開心地扭來扭去（點頭才會叫醒牠）' + $nl +
-                '‧右鍵「才藝表演」：握手、轉圈、裝死（翻肚）、坐下、趴下' + $nl +
+                '‧右鍵「才藝表演」：握手、轉圈、翻肚、坐下、趴下' + $nl +
                 '‧右鍵：做動作、才藝表演、餵點心、餵水、睡覺、換衣服、鬧鐘、番茄鐘、健康提醒和各種設定' + $nl +
                 '‧鬧鐘：可以設好幾組（只響一次或每天），時間到旺旺會用真的叫聲汪汪叫，點牠一下就停' + $nl +
                 '‧自動汪汪叫會發出旺旺真的叫聲（右鍵可以關掉聲音）' + $nl +
@@ -5034,6 +5076,16 @@ try {
                 if ((Get-Date) -ge $script:hiddenUntil) { Show-Dog '我回來了！旺旺躲好久喔～' }
                 return
             }
+            # Hiding behind the windows: the time is up = breaks out and runs over; otherwise back to the
+            # bottom of the window pile every 3 seconds (a click on it, or another program, may have lifted it).
+            if ($script:dogBehind) {
+                if ((Get-Date) -ge $script:behindUntil) {
+                    try { Invoke-DogSummon } catch { $null = Write-ErrorLog ('躲起來回來錯誤：' + $_.ToString()); Stop-DogBehind }
+                } elseif (($script:clockTick - $script:behindTick) -ge 50 -and -not $script:isDragging -and -not $script:hovering -and -not [bool]$script:cms.Visible) {
+                    $script:behindTick = $script:clockTick
+                    try { $script:form.TopMost = $false; $script:form.SendToBack() } catch { }
+                }
+            }
             # A tick is 60 ms; in power-saving mode one 240 ms tick counts as 4.
             $step = [Math]::Max(1, [int][Math]::Round($script:timer.Interval / 60.0))
             $script:idleTick += $step
@@ -5226,10 +5278,9 @@ try {
                         if ($t -ge 11) { $yOffset = [int]([Math]::Abs([Math]::Sin($t / 1.3)) * -6) }
                         if ($t -eq 11) {
                             # Landed: in front of the broken glass from now on.
-                            $keepDogTop = [bool]$script:form.TopMost
-                            $script:form.TopMost = -not $keepDogTop
+                            $script:form.TopMost = -not $script:topMostWanted
                             $script:form.TopMost = $true
-                            $script:form.TopMost = $keepDogTop
+                            $script:form.TopMost = $script:topMostWanted
                             $outLines = @('汪！我衝出來了！', '哈囉～我從螢幕裡跑出來了！', '找我嗎？我在這！汪汪！')
                             Set-Bubble ([string]$outLines[$script:rng.Next(0, $outLines.Count)])
                         }
@@ -5259,7 +5310,7 @@ try {
                         if ($t -ge 94) { $yOffset = [int]([Math]::Abs([Math]::Sin($t / 1.3)) * -6) }
                         if ($t -eq 50) { Set-Bubble '……（偷看）' }
                         if ($t -eq 94 -and -not $script:trickPoked) {
-                            $deadLines = @('嘿嘿～騙到你了吧！', '旺旺復活了！汪！', '裝死成功～有點心嗎？')
+                            $deadLines = @('嘿嘿～翻回來了！', '旺旺起來了！汪！', '翻肚表演完畢～有點心嗎？')
                             Set-Bubble ([string]$deadLines[$script:rng.Next(0, $deadLines.Count)])
                         }
                     }
@@ -5448,7 +5499,7 @@ try {
             }
 
             # 5) Free roaming (not during an action)
-            if ($script:roamEnabled -and -not $script:isDragging -and -not $menuOpen -and $script:dogAct -eq '' -and $script:focusState -ne 'focus') {
+            if (($script:roamEnabled -or $script:clockTick -lt $script:summonRunUntil) -and -not $script:isDragging -and -not $menuOpen -and $script:dogAct -eq '' -and $script:focusState -ne 'focus') {
                 try {
                     Step-Roam
                 } catch {
@@ -5464,7 +5515,7 @@ try {
             }
             $script:dogRunning = $false
             if ($script:roamMoving) {
-                $runningAfter = ($script:clockTick -lt $script:circleChaseUntil)
+                $runningAfter = ($script:clockTick -lt $script:circleChaseUntil) -or ($script:clockTick -lt $script:summonRunUntil)
                 $wantRun = ([bool]$script:dogChaseMouse -or $script:roamSpeed -ge 5.0 -or $runningAfter -or [bool]$script:begging)
                 if ($wantRun -and (Test-RunFrames)) {
                     # Running like the real 旺旺 (chasing the pointer, walking fast, coming over to ask for food or
