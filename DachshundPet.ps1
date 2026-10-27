@@ -1,6 +1,6 @@
 ﻿#requires -Version 5.1
 # =============================================================================
-# 臘腸狗桌寵 V1.21.0 - 旺旺, a dachshund desktop pet (low-risk edition)
+# 臘腸狗桌寵 V1.21.1 - 旺旺, a dachshund desktop pet (low-risk edition)
 #   Made from Fighter V24.7: only the dachshund is kept.
 #   * Offline only: this program contains no network code.
 #   * Writes only into its own folder, and only when something goes wrong
@@ -20,7 +20,7 @@
 # =============================================================================
 param([switch]$Classic)
 $ErrorActionPreference = 'Stop'
-$script:appVersion = 'V1.21.0'
+$script:appVersion = 'V1.21.1'
 $script:appTitle = '臘腸狗桌寵 ' + $script:appVersion + '（旺旺）'
 try { $Host.UI.RawUI.WindowTitle = '旺旺（臘腸狗桌寵）- 關閉這個視窗會結束旺旺' } catch { }
 Add-Type -AssemblyName System.Windows.Forms
@@ -1367,27 +1367,77 @@ function Test-DogCovered {
     return ([WangwangFx.Cover]::CountCovered($script:form.Handle, $pts) -ge 2)
 }
 
+function Write-GlassCheck([string]$text) {
+    # One line per call-back from hiding, kept to the last 30 lines (glass_check.txt in the pet folder).
+    try {
+        $path = Join-Path $PSScriptRoot 'glass_check.txt'
+        $lines = @()
+        if (Test-Path -LiteralPath $path) { $lines = @([System.IO.File]::ReadAllLines($path)) }
+        $lines += ((Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ' ' + $script:appVersion + ' ' + $text)
+        if ($lines.Count -gt 30) { $lines = $lines[($lines.Count - 30)..($lines.Count - 1)] }
+        [System.IO.File]::WriteAllLines($path, [string[]]$lines, [System.Text.UTF8Encoding]::new($false))
+    } catch { }
+}
+
 function Initialize-GlassWindow {
     if ($null -ne $script:glassForm) { return }
-    $gf = New-Object WangwangFx.GlassForm
+    # A borderless window with a see-through key colour: every Windows can show it. Where possible it never takes the
+    # keyboard focus and clicks go through it (WangwangFx.GlassForm); otherwise a plain window.
+    $gf = $null
+    if ($script:glassAvailable) { try { $gf = New-Object WangwangFx.GlassForm } catch { $gf = $null } }
+    if ($null -eq $gf) { $gf = New-Object System.Windows.Forms.Form }
     $gf.Text = '旺旺衝出來'
     $gf.FormBorderStyle = 'None'
     $gf.StartPosition = 'Manual'
     $gf.TopMost = $true
     $gf.ShowInTaskbar = $false
+    $gf.BackColor = [System.Drawing.Color]::Magenta
+    $gf.TransparencyKey = [System.Drawing.Color]::Magenta
+    $gf.BackgroundImageLayout = [System.Windows.Forms.ImageLayout]::None
     $gf.Width = 20
     $gf.Height = 20
     $gf.Location = [System.Drawing.Point]::new(-25000, -25000)
-    $script:glassBlank = [System.Drawing.Bitmap]::new(2, 2, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
     $script:glassForm = $gf
-    $gf.Show()
-    [WangwangPet.SmoothWindow]::Reset($gf.Handle)
+    $script:glassShown = $false
 }
 
 function Hide-GlassFx {
     $script:glassTick = -1
     if ($null -eq $script:glassForm) { return }
-    try { [void][WangwangPet.SmoothWindow]::Show($script:glassForm.Handle, $script:glassBlank, -25000, -25000) } catch { }
+    try {
+        $script:glassForm.Location = [System.Drawing.Point]::new(-25000, -25000)
+        $script:glassForm.Hide()
+        $old = $script:glassForm.BackgroundImage
+        $script:glassForm.BackgroundImage = $null
+        if ($null -ne $old) { $old.Dispose() }
+    } catch { }
+}
+
+function Show-GlassFrame([System.Drawing.Bitmap]$bmp) {
+    # The glass picture on the key colour (half see-through glass becomes solid light glass).
+    $S = $bmp.Width
+    $keyed = [System.Drawing.Bitmap]::new($S, $S, [System.Drawing.Imaging.PixelFormat]::Format24bppRgb)
+    $kg = [System.Drawing.Graphics]::FromImage($keyed)
+    try {
+        $kg.Clear([System.Drawing.Color]::Magenta)
+        $cut = Convert-AlphaCut $bmp
+        try { $kg.DrawImageUnscaled($cut, 0, 0) } finally { $cut.Dispose() }
+    } finally {
+        $kg.Dispose()
+    }
+    $f = $script:glassForm
+    if ($f.Width -ne $S -or $f.Height -ne $S) { $f.Size = [System.Drawing.Size]::new($S, $S) }
+    $f.Location = [System.Drawing.Point]::new($script:glassLeft, $script:glassTop)
+    $old = $f.BackgroundImage
+    $f.BackgroundImage = $keyed
+    if ($null -ne $old) { $old.Dispose() }
+    if (-not $f.Visible) {
+        $f.Show()
+        $f.TopMost = $false
+        $f.TopMost = $true
+        $script:glassShown = $true
+    }
+    $f.Refresh()
 }
 
 function Start-GlassBurst {
@@ -1479,10 +1529,8 @@ function Start-GlassBurst {
     $script:actionMode = 'idle'
     $script:actionTick = 0
     $script:form.Location = [System.Drawing.Point]::new(-25000, -25000)
-    # The glass layer in front of everything.
-    $script:glassForm.TopMost = $false
-    $script:glassForm.TopMost = $true
     Update-GlassFx
+    Write-GlassCheck ('glass started: shown=' + [bool]$script:glassForm.Visible + ' at ' + $script:glassLeft + ',' + $script:glassTop + ' size ' + $S)
 }
 
 function New-GlassShard($corner, [double]$c, [double]$S, $rng) {
@@ -1626,8 +1674,7 @@ function Update-GlassFx {
         } finally {
             $g.Dispose()
         }
-        $code = [WangwangPet.SmoothWindow]::Show($script:glassForm.Handle, $bmp, $script:glassLeft, $script:glassTop)
-        if ($code -ne 0) { throw ('玻璃效果顯示失敗，代碼 ' + $code) }
+        Show-GlassFrame $bmp
     } finally {
         $bmp.Dispose()
     }
@@ -1641,7 +1688,8 @@ function Invoke-DogSummon {
     if ($wasBehind) { Stop-DogBehind }
     $script:bedWalkUntil = 0
     $burst = $false
-    $canBurst = ($script:glassEnabled -and $script:glassAvailable -and $script:smoothMode -and -not $script:dogHidden -and $script:glassTick -lt 0 -and $script:dogAct -ne 'burst')
+    $canBurst = ($script:glassEnabled -and -not $script:dogHidden -and $script:glassTick -lt 0 -and $script:dogAct -ne 'burst')
+    if ($wasBehind) { Write-GlassCheck ('called back: smooth=' + $script:smoothMode + ' coverCheck=' + $script:glassAvailable + ' glassOn=' + $script:glassEnabled + ' act=' + $script:dogAct + ' canBurst=' + $canBurst) }
     if ($canBurst) {
         if ($wasBehind) {
             # It was hiding behind the windows on purpose: always out through the glass.
@@ -1653,7 +1701,6 @@ function Invoke-DogSummon {
     $noGlass = ''
     if ($wasBehind -and -not $canBurst) {
         if (-not $script:glassEnabled) { $noGlass = '（打破螢幕的效果在互動設定裡關掉了）' }
-        elseif (-not $script:smoothMode -or -not $script:glassAvailable) { $noGlass = '（這台電腦是用一般顯示啟動，沒有打破螢幕的效果）' }
         if (-not [string]::IsNullOrEmpty($noGlass)) { $null = Write-ErrorLog ('叫旺旺出來時沒有打破螢幕：' + $noGlass + ' smooth=' + $script:smoothMode + ' glass=' + $script:glassAvailable) }
     }
     if ($script:dogHidden) { Show-Dog '我在這裡！汪～' }
@@ -1679,6 +1726,7 @@ function Invoke-DogSummon {
             return
         } catch {
             $null = Write-ErrorLog ('衝出來效果錯誤：' + $_.ToString())
+            Write-GlassCheck ('glass error: ' + $_.ToString())
             Hide-GlassFx
             if ($script:dogAct -eq 'burst') { $script:dogAct = '' }
         }
@@ -4150,7 +4198,6 @@ try {
     $script:glassDogPath = ''
     $script:glassDogFlip = $false
     $script:glassPlayer = $null
-    $script:glassBlank = $null
     $script:nextClockCheck = 0
     $script:nextScreenCheck = 0
     $script:isNight = Test-NightTime
@@ -4813,7 +4860,7 @@ try {
         $playItem.Tag = [string]$playInfo[1]
         $playItem.CheckOnClick = $true
         $playItem.Checked = $true
-        if ([string]$playInfo[1] -eq 'glass' -and -not $script:glassAvailable) {
+        if ([string]$playInfo[1] -eq 'glass' -and $false) {
             # Needs the smooth-edge display: shown greyed out.
             $playItem.Checked = $false
             $playItem.Enabled = $false
@@ -5215,6 +5262,7 @@ try {
                     Update-GlassFx
                 } catch {
                     $null = Write-ErrorLog ('衝出來效果錯誤：' + $_.ToString())
+                    Write-GlassCheck ('glass error while playing: ' + $_.ToString())
                     Hide-GlassFx
                 }
             }

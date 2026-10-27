@@ -1,2 +1,4 @@
 # Error logs the pet writes only when something goes wrong
 DachshundPet_Error_*.txt
+# Check log written when 旺旺 is called back from hiding
+glass_check.txt
