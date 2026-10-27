@@ -1,6 +1,6 @@
 ﻿#requires -Version 5.1
 # =============================================================================
-# 臘腸狗桌寵 V1.19.0 - 旺旺, a dachshund desktop pet (low-risk edition)
+# 臘腸狗桌寵 V1.19.1 - 旺旺, a dachshund desktop pet (low-risk edition)
 #   Made from Fighter V24.7: only the dachshund is kept.
 #   * Offline only: this program contains no network code.
 #   * Writes only into its own folder, and only when something goes wrong
@@ -20,7 +20,7 @@
 # =============================================================================
 param([switch]$Classic)
 $ErrorActionPreference = 'Stop'
-$script:appVersion = 'V1.19.0'
+$script:appVersion = 'V1.19.1'
 $script:appTitle = '臘腸狗桌寵 ' + $script:appVersion + '（旺旺）'
 try { $Host.UI.RawUI.WindowTitle = '旺旺（臘腸狗桌寵）- 關閉這個視窗會結束旺旺' } catch { }
 Add-Type -AssemblyName System.Windows.Forms
@@ -1125,38 +1125,39 @@ function Import-DotSetting {
 }
 
 function Get-DotImage([int]$size) {
-    # Round orange-brown button with a white ring and 旺旺's head (wangwang.ico) in the middle.
-    $bmp = [System.Drawing.Bitmap]::new($size, $size)
+    # 旺旺's own icon (wangwang.ico, the largest picture in it) scaled to the button size, see-through around it.
+    $bmp = [System.Drawing.Bitmap]::new($size, $size, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     try {
-        $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+        $g.Clear([System.Drawing.Color]::Transparent)
         $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
-        $g.Clear([System.Drawing.Color]::White)
-        $fill = [System.Drawing.SolidBrush]::new([System.Drawing.Color]::FromArgb(196, 120, 52))
-        $ring = [System.Drawing.Pen]::new([System.Drawing.Color]::White, [single][Math]::Max(2.0, $size / 14.0))
-        try {
-            $g.FillEllipse($fill, 1, 1, $size - 3, $size - 3)
-            $g.DrawEllipse($ring, 2, 2, $size - 5, $size - 5)
-        } finally {
-            $fill.Dispose()
-            $ring.Dispose()
-        }
+        $g.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+        $g.CompositingQuality = [System.Drawing.Drawing2D.CompositingQuality]::HighQuality
         $icoPath = Join-Path $PSScriptRoot 'wangwang.ico'
+        $drawn = $false
         if (Test-Path -LiteralPath $icoPath) {
-            $inner = [int]($size * 0.68)
-            $ico = $null
-            try {
-                $ico = [System.Drawing.Icon]::new($icoPath, $inner, $inner)
-                $icoBmp = $ico.ToBitmap()
+            # Largest picture that this Windows can read (some cannot read the 256 one): 256, then 64, 48, 32.
+            foreach ($want in @(256, 64, 48, 32)) {
+                if ($drawn) { break }
+                $ico = $null
                 try {
-                    $off = [int](($size - $inner) / 2)
-                    $g.DrawImage($icoBmp, [System.Drawing.Rectangle]::new($off, $off, $inner, $inner))
-                } finally {
-                    $icoBmp.Dispose()
+                    $ico = [System.Drawing.Icon]::new($icoPath, $want, $want)
+                    $icoBmp = $ico.ToBitmap()
+                    try {
+                        $g.DrawImage($icoBmp, [System.Drawing.Rectangle]::new(0, 0, $size, $size))
+                        $drawn = $true
+                    } finally {
+                        $icoBmp.Dispose()
+                    }
+                } catch { } finally {
+                    if ($null -ne $ico) { $ico.Dispose() }
                 }
-            } catch { } finally {
-                if ($null -ne $ico) { $ico.Dispose() }
             }
+        }
+        if (-not $drawn) {
+            # No icon file: a plain brown dot so the button can still be found.
+            $fill = [System.Drawing.SolidBrush]::new([System.Drawing.Color]::FromArgb(196, 120, 52))
+            try { $g.FillEllipse($fill, 1, 1, $size - 3, $size - 3) } finally { $fill.Dispose() }
         }
     } finally {
         $g.Dispose()
@@ -1164,9 +1165,18 @@ function Get-DotImage([int]$size) {
     return $bmp
 }
 
+function Update-DotView {
+    # Soft see-through edges where the smooth display works, otherwise the icon cut out on a colour key.
+    if ($null -eq $script:dotForm -or $null -eq $script:dotBitmap) { return }
+    if ($script:dotLayered) {
+        $code = [WangwangPet.SmoothWindow]::Show($script:dotForm.Handle, $script:dotBitmap, $script:dotForm.Left, $script:dotForm.Top)
+        if ($code -ne 0) { throw ('浮動按鈕顯示失敗，代碼 ' + $code) }
+    }
+}
+
 function Initialize-DotButton {
     if ($null -ne $script:dotForm) { return }
-    $size = Get-Scaled 44
+    $size = Get-Scaled 48
     $f = New-Object System.Windows.Forms.Form
     $f.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
     $f.ShowInTaskbar = $false
@@ -1174,14 +1184,24 @@ function Initialize-DotButton {
     $f.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
     $f.Size = [System.Drawing.Size]::new($size, $size)
     $f.Location = $script:dotPos
-    $f.BackColor = [System.Drawing.Color]::White
-    $f.BackgroundImage = Get-DotImage $size
-    $f.Opacity = 0.9
     $f.Text = '旺旺浮動按鈕'
-    $round = [System.Drawing.Drawing2D.GraphicsPath]::new()
-    $round.AddEllipse(0, 0, $size, $size)
-    $f.Region = [System.Drawing.Region]::new($round)
-    $round.Dispose()
+    $script:dotBitmap = Get-DotImage $size
+    $script:dotLayered = [bool]$script:smoothAvailable
+    if (-not $script:dotLayered) {
+        # Colour-key window: the icon with its soft edge cut hard, on a key colour that becomes see-through.
+        $f.BackColor = [System.Drawing.Color]::Magenta
+        $f.TransparencyKey = [System.Drawing.Color]::Magenta
+        $keyed = [System.Drawing.Bitmap]::new($size, $size)
+        $kg = [System.Drawing.Graphics]::FromImage($keyed)
+        try {
+            $kg.Clear([System.Drawing.Color]::Magenta)
+            $cut = Convert-AlphaCut $script:dotBitmap
+            try { $kg.DrawImageUnscaled($cut, 0, 0) } finally { $cut.Dispose() }
+        } finally {
+            $kg.Dispose()
+        }
+        $f.BackgroundImage = $keyed
+    }
     $tip = New-Object System.Windows.Forms.ToolTip
     $tip.SetToolTip($f, '旺旺（右鍵：旺旺的選單；左鍵：叫旺旺過來；拖曳：移動按鈕）')
     $script:dotTip = $tip
@@ -1224,14 +1244,13 @@ function Initialize-DotButton {
                 $y = [Math]::Min([Math]::Max($loc.Y, $box.Top), $box.Bottom - $sz)
                 $script:dotForm.Location = [System.Drawing.Point]::new($x, $y)
                 $script:dotPos = $script:dotForm.Location
+                try { Update-DotView } catch { }
                 Save-DotSetting
                 return
             }
             Invoke-DogSummon
         } catch { $null = Write-ErrorLog ('浮動按鈕錯誤：' + $_.ToString()) }
     })
-    $f.Add_MouseEnter({ try { $script:dotForm.Opacity = 1.0 } catch { } })
-    $f.Add_MouseLeave({ try { $script:dotForm.Opacity = 0.9 } catch { } })
     $script:dotForm = $f
 }
 
@@ -1241,7 +1260,18 @@ function Set-DotButton([bool]$on, [bool]$say = $true) {
     if ($on) {
         Initialize-DotButton
         $script:dotForm.Location = $script:dotPos
-        if (-not $script:dotForm.Visible) { $script:dotForm.Show() }
+        if (-not $script:dotForm.Visible) {
+            $script:dotForm.Show()
+            if ($script:dotLayered) {
+                try {
+                    [WangwangPet.SmoothWindow]::Reset($script:dotForm.Handle)
+                    Update-DotView
+                } catch {
+                    $null = Write-ErrorLog ('浮動按鈕改用一般顯示：' + $_.ToString())
+                    $script:dotLayered = $false
+                }
+            }
+        }
         $script:dotForm.TopMost = $false
         $script:dotForm.TopMost = $true
         if ($say) { Set-Bubble '浮動按鈕出現了！右鍵點它就能開我的選單～' }
@@ -4078,6 +4108,8 @@ try {
     if (-not [string]::IsNullOrEmpty($script:alarmFile)) { $script:dotFile = Join-Path (Split-Path -Parent $script:alarmFile) 'dot.txt' }
     $script:dotForm = $null
     $script:dotTip = $null
+    $script:dotBitmap = $null
+    $script:dotLayered = $false
     $script:dotMenuItems = @()
     $script:dotDown = $false
     $script:dotDragged = $false
@@ -5551,6 +5583,7 @@ try {
         try { if ($null -ne $script:trayIcon) { $script:trayIcon.Visible = $false; $script:trayIcon.Dispose() } } catch { }
         try { if ($null -ne $script:dotForm) { $script:dotForm.Close(); $script:dotForm.Dispose() } } catch { }
         try { if ($null -ne $script:dotTip) { $script:dotTip.Dispose() } } catch { }
+        try { if ($null -ne $script:dotBitmap) { $script:dotBitmap.Dispose() } } catch { }
         try { $script:instanceMutex.ReleaseMutex() } catch { }
     })
     $form.Add_Shown({
