@@ -20,7 +20,7 @@
 # =============================================================================
 param([switch]$Classic)
 $ErrorActionPreference = 'Stop'
-$script:appVersion = 'V1.21.2'
+$script:appVersion = 'V1.21.3'
 $script:appTitle = '臘腸狗桌寵 ' + $script:appVersion + '（旺旺）'
 try { $Host.UI.RawUI.WindowTitle = '旺旺（臘腸狗桌寵）- 關閉這個視窗會結束旺旺' } catch { }
 Add-Type -AssemblyName System.Windows.Forms
@@ -1419,6 +1419,8 @@ function Initialize-GlassWindow {
     $gf.Width = 20
     $gf.Height = 20
     $gf.Location = [System.Drawing.Point]::new(-25000, -25000)
+    # Drawn off screen first, then shown in one go: no blinking between pictures.
+    try { $gf.GetType().GetProperty('DoubleBuffered', [System.Reflection.BindingFlags]'Instance,NonPublic').SetValue($gf, $true, $null) } catch { }
     $script:glassForm = $gf
     $script:glassShown = $false
 }
@@ -1437,8 +1439,9 @@ function Hide-GlassFx {
 
 function Show-GlassFrame([System.Drawing.Bitmap]$bmp) {
     # The glass picture on the key colour (half see-through glass becomes solid light glass).
-    $S = $bmp.Width
-    $keyed = [System.Drawing.Bitmap]::new($S, $S, [System.Drawing.Imaging.PixelFormat]::Format24bppRgb)
+    $BW = $bmp.Width
+    $BH = $bmp.Height
+    $keyed = [System.Drawing.Bitmap]::new($BW, $BH, [System.Drawing.Imaging.PixelFormat]::Format24bppRgb)
     $kg = [System.Drawing.Graphics]::FromImage($keyed)
     try {
         $kg.Clear([System.Drawing.Color]::Magenta)
@@ -1448,7 +1451,7 @@ function Show-GlassFrame([System.Drawing.Bitmap]$bmp) {
         $kg.Dispose()
     }
     $f = $script:glassForm
-    if ($f.Width -ne $S -or $f.Height -ne $S) { $f.Size = [System.Drawing.Size]::new($S, $S) }
+    if ($f.Width -ne $BW -or $f.Height -ne $BH) { $f.Size = [System.Drawing.Size]::new($BW, $BH) }
     $f.Location = [System.Drawing.Point]::new($script:glassLeft, $script:glassTop)
     $old = $f.BackgroundImage
     $f.BackgroundImage = $keyed
@@ -1472,8 +1475,16 @@ function Start-GlassBurst {
     $script:glassSize = $S
     $script:glassCx = [double]$script:baseLocation.X + $w * 0.5
     $script:glassCy = [double]$script:baseLocation.Y + $h * 0.58
-    $script:glassLeft = [int]($script:glassCx - $S / 2.0)
-    $script:glassTop = [int]($script:glassCy - $S / 2.0)
+    # The cracks fit in an S x S square round the impact; the window is bigger (mostly downwards)
+    # so the falling glass pieces are gone before they reach its edge.
+    $script:glassSqLeft = $script:glassCx - $S / 2.0
+    $script:glassSqTop = $script:glassCy - $S / 2.0
+    $script:glassPadX = [int]($S * 0.18)
+    $script:glassPadTop = [int]($S * 0.12)
+    $script:glassW = $S + 2 * $script:glassPadX
+    $script:glassH = [int]($S * 1.64)
+    $script:glassLeft = [int]($script:glassSqLeft) - $script:glassPadX
+    $script:glassTop = [int]($script:glassSqTop) - $script:glassPadTop
     $c = $S / 2.0
     $rng = $script:rng
     # Cracks: jagged lines out from the point of impact, and broken rings between them.
@@ -1493,6 +1504,7 @@ function Start-GlassBurst {
     }
     $script:glassCracks = $cracks
     $rings = @()
+    $ringR = @()
     foreach ($rr in @(0.11, 0.21)) {
         for ($i = 0; $i -lt $n; $i++) {
             if ($rng.NextDouble() -gt 0.75) { continue }
@@ -1508,9 +1520,11 @@ function Start-GlassBurst {
             $seg[1] = [System.Drawing.PointF]::new([float]($c + [Math]::Cos($am) * $rm), [float]($c + [Math]::Sin($am) * $rm))
             $seg[2] = [System.Drawing.PointF]::new([float]($c + [Math]::Cos($a2) * $r2), [float]($c + [Math]::Sin($a2) * $r2))
             $rings += ,$seg
+            $ringR += ($S * $rr)
         }
     }
     $script:glassRings = $rings
+    $script:glassRingR = $ringR
     # The hole 旺旺 jumps through.
     $hole = New-Object 'System.Drawing.PointF[]' $n
     for ($i = 0; $i -lt $n; $i++) {
@@ -1583,12 +1597,27 @@ function New-GlassShard($corner, [double]$c, [double]$S, $rng) {
     }
 }
 
+function Get-PartialLine($pl, [double]$f) {
+    # The first part (0..1 of its length in steps) of a crack line, ending smoothly between two points.
+    $segs = $pl.Count - 1
+    $pos = [Math]::Max(0.02, [Math]::Min(1.0, $f)) * $segs
+    $whole = [int][Math]::Floor($pos)
+    if ($whole -ge $segs) { return ,$pl }
+    $frac = $pos - $whole
+    $out = New-Object 'System.Drawing.PointF[]' ($whole + 2)
+    for ($k = 0; $k -le $whole; $k++) { $out[$k] = $pl[$k] }
+    $a = $pl[$whole]
+    $b = $pl[$whole + 1]
+    $out[$whole + 1] = [System.Drawing.PointF]::new([float]($a.X + ($b.X - $a.X) * $frac), [float]($a.Y + ($b.Y - $a.Y) * $frac))
+    return ,$out
+}
+
 function Update-GlassFx {
     # The breaking glass moves half a step per animation tick (about 3.7 seconds in all), slow enough to see.
     if ($script:glassTick -lt 0) { return }
     $g0 = $script:glassTick / 2.0
     $script:glassTick++
-    if ($g0 -gt 30) { Hide-GlassFx; return }
+    if ($g0 -gt 25) { Hide-GlassFx; return }
     $S = $script:glassSize
     $c = $S / 2.0
     if (($script:glassTick - 1) -eq 8 -and $script:autoBarkSound) {
@@ -1601,11 +1630,13 @@ function Update-GlassFx {
             if ($null -ne $script:glassPlayer) { $script:glassPlayer.Play() }
         } catch { $null = Write-ErrorLog ('玻璃聲音錯誤：' + $_.ToString()) }
     }
-    $bmp = [System.Drawing.Bitmap]::new($S, $S, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    $bmp = [System.Drawing.Bitmap]::new([int]$script:glassW, [int]$script:glassH, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
     try {
         $g = [System.Drawing.Graphics]::FromImage($bmp)
         try {
             $g.Clear([System.Drawing.Color]::Transparent)
+            # Everything below is drawn in the S x S square round the impact.
+            $g.TranslateTransform([float]$script:glassPadX, [float]$script:glassPadTop)
             $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
             $lw = [float][Math]::Max(1.5, $S / 300.0)
             # The flash of the impact.
@@ -1615,28 +1646,38 @@ function Update-GlassFx {
                 try { $g.FillEllipse($fb, [float]($c - $fr), [float]($c - $fr), [float](2 * $fr), [float](2 * $fr)) } finally { $fb.Dispose() }
             }
             # The hole, fading as 旺旺 comes through.
+            # (Fading cannot be shown on this kind of window, so things shrink away instead.)
             if ($g0 -ge 4 -and $g0 -lt 13) {
-                $ha = [int](210 * [Math]::Min(1.0, (13 - $g0) / 5.0))
-                $hb = [System.Drawing.SolidBrush]::new([System.Drawing.Color]::FromArgb($ha, 18, 20, 28))
-                try { $g.FillPolygon($hb, $script:glassHole) } finally { $hb.Dispose() }
+                $hk = [Math]::Min(1.0, (13 - $g0) / 5.0)
+                $hp = New-Object 'System.Drawing.PointF[]' $script:glassHole.Count
+                for ($q = 0; $q -lt $hp.Count; $q++) {
+                    $hp[$q] = [System.Drawing.PointF]::new([float]($c + ($script:glassHole[$q].X - $c) * $hk), [float]($c + ($script:glassHole[$q].Y - $c) * $hk))
+                }
+                $hb = [System.Drawing.SolidBrush]::new([System.Drawing.Color]::FromArgb(230, 18, 20, 28))
+                try { $g.FillPolygon($hb, $hp) } finally { $hb.Dispose() }
             }
             # Cracks: grow in the first four pictures, fade out after the landing.
-            $ca = 235
-            if ($g0 -gt 10) { $ca = [int](235 * [Math]::Max(0.0, (20 - $g0) / 10.0)) }
-            if ($ca -gt 0) {
-                $grow = [Math]::Min(1.0, ($g0 + 1) / 4.0)
-                $dark = [System.Drawing.Pen]::new([System.Drawing.Color]::FromArgb([int]($ca * 0.55), 40, 48, 60), [float]($lw + 1.6))
-                $light = [System.Drawing.Pen]::new([System.Drawing.Color]::FromArgb($ca, 250, 252, 255), $lw)
+            # Cracks: run outwards smoothly at the start, pull back to the middle after the landing.
+            $grow = [Math]::Min(1.0, ($g0 + 1) / 4.0)
+            if ($g0 -gt 12) { $grow = [Math]::Max(0.0, (21 - $g0) / 9.0) }
+            if ($grow -gt 0.02) {
+                $dark = [System.Drawing.Pen]::new([System.Drawing.Color]::FromArgb(140, 40, 48, 60), [float]($lw + 1.6))
+                $light = [System.Drawing.Pen]::new([System.Drawing.Color]::FromArgb(235, 250, 252, 255), $lw)
                 try {
+                    $reach = 0.0
                     foreach ($pl in $script:glassCracks) {
-                        $m = [Math]::Max(2, [int][Math]::Ceiling($pl.Count * $grow))
-                        $part = New-Object 'System.Drawing.PointF[]' $m
-                        [Array]::Copy($pl, $part, $m)
+                        $part = Get-PartialLine $pl $grow
                         $g.DrawLines($dark, $part)
                         $g.DrawLines($light, $part)
+                        $reach = [Math]::Max($reach, [Math]::Sqrt(($part[$part.Count - 1].X - $c) * ($part[$part.Count - 1].X - $c) + ($part[$part.Count - 1].Y - $c) * ($part[$part.Count - 1].Y - $c)))
                     }
                     if ($g0 -ge 2) {
-                        foreach ($seg in $script:glassRings) { $g.DrawLines($dark, $seg); $g.DrawLines($light, $seg) }
+                        for ($q = 0; $q -lt $script:glassRings.Count; $q++) {
+                            # A ring goes when the cracks have pulled back inside it.
+                            if ($g0 -gt 12 -and $reach * 0.8 -lt [double]$script:glassRingR[$q]) { continue }
+                            $g.DrawLines($dark, $script:glassRings[$q])
+                            $g.DrawLines($light, $script:glassRings[$q])
+                        }
                     }
                 } finally {
                     $dark.Dispose()
@@ -1644,14 +1685,14 @@ function Update-GlassFx {
                 }
             }
             # 旺旺 jumping out of the hole: grows from small to full size.
-            if ($g0 -ge 4 -and $g0 -le 10 -and $script:dogAct -eq 'burst' -and -not [string]::IsNullOrEmpty($script:glassDogPath)) {
-                $p = ($g0 - 4) / 6.0
+            if ($g0 -ge 4 -and $script:dogAct -eq 'burst' -and $script:dogActTick -lt 22 -and -not [string]::IsNullOrEmpty($script:glassDogPath)) {
+                $p = [Math]::Min(1.0, ($g0 - 4) / 6.0)
                 $k = 0.45 + 0.55 * (1 - (1 - $p) * (1 - $p))
                 $dog = Get-DisplayBitmap $script:glassDogPath $script:glassDogFlip
                 $dw = [double]$script:form.Width
                 $dh = [double]$script:form.Height
-                $ox = [double]$script:baseLocation.X - $script:glassLeft
-                $oy = [double]$script:baseLocation.Y - $script:glassTop
+                $ox = [double]$script:baseLocation.X - $script:glassSqLeft
+                $oy = [double]$script:baseLocation.Y - $script:glassSqTop
                 $lift = [Math]::Sin([Math]::PI * $p) * $dh * 0.10
                 $rx = $c + ($ox - $c) * $k
                 $ry = $c + ($oy - $c) * $k - $lift
@@ -1660,11 +1701,12 @@ function Update-GlassFx {
             }
             # Glass pieces fly out and fall, turning, then fade.
             if ($g0 -ge 4) {
-                $sa = 225
-                if ($g0 -gt 16) { $sa = [int](225 * [Math]::Max(0.0, (30 - $g0) / 14.0)) }
-                $fill = [System.Drawing.SolidBrush]::new([System.Drawing.Color]::FromArgb([int]($sa * 0.55), 205, 228, 245))
-                $edge = [System.Drawing.Pen]::new([System.Drawing.Color]::FromArgb($sa, 250, 253, 255), [float]([Math]::Max(1.0, $lw * 0.8)))
-                $shade = [System.Drawing.Pen]::new([System.Drawing.Color]::FromArgb([int]($sa * 0.5), 60, 75, 95), [float]([Math]::Max(1.0, $lw * 0.6)))
+                # Pieces get smaller as they fall and are gone before the edge of the glass window.
+                $life = 1.0
+                if ($g0 -gt 14) { $life = [Math]::Max(0.0, (24 - $g0) / 10.0) }
+                $fill = [System.Drawing.SolidBrush]::new([System.Drawing.Color]::FromArgb(130, 205, 228, 245))
+                $edge = [System.Drawing.Pen]::new([System.Drawing.Color]::FromArgb(225, 250, 253, 255), [float]([Math]::Max(1.0, $lw * 0.8)))
+                $shade = [System.Drawing.Pen]::new([System.Drawing.Color]::FromArgb(120, 60, 75, 95), [float]([Math]::Max(1.0, $lw * 0.6)))
                 try {
                     foreach ($sh in $script:glassShards) {
                         if ($g0 -gt 4) {
@@ -1674,13 +1716,14 @@ function Update-GlassFx {
                             $sh.VX *= 0.985
                             $sh.Rot += $sh.VR * 0.5
                         }
+                        if ($life -le 0.03) { continue }
                         $cn = $sh.DX.Count
                         $poly = New-Object 'System.Drawing.PointF[]' $cn
                         $cs = [Math]::Cos($sh.Rot)
                         $sn = [Math]::Sin($sh.Rot)
                         for ($q = 0; $q -lt $cn; $q++) {
-                            $qx = $sh.DX[$q] * $cs - $sh.DY[$q] * $sn
-                            $qy = $sh.DX[$q] * $sn + $sh.DY[$q] * $cs
+                            $qx = ($sh.DX[$q] * $cs - $sh.DY[$q] * $sn) * $life
+                            $qy = ($sh.DX[$q] * $sn + $sh.DY[$q] * $cs) * $life
                             $poly[$q] = [System.Drawing.PointF]::new([float]($sh.X + $qx), [float]($sh.Y + $qy))
                         }
                         $g.FillPolygon($fill, $poly)
