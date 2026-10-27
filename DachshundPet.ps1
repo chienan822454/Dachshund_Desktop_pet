@@ -1,6 +1,6 @@
 ﻿#requires -Version 5.1
 # =============================================================================
-# 臘腸狗桌寵 V1.21.1 - 旺旺, a dachshund desktop pet (low-risk edition)
+# 臘腸狗桌寵 V1.21.2 - 旺旺, a dachshund desktop pet (low-risk edition)
 #   Made from Fighter V24.7: only the dachshund is kept.
 #   * Offline only: this program contains no network code.
 #   * Writes only into its own folder, and only when something goes wrong
@@ -20,7 +20,7 @@
 # =============================================================================
 param([switch]$Classic)
 $ErrorActionPreference = 'Stop'
-$script:appVersion = 'V1.21.1'
+$script:appVersion = 'V1.21.2'
 $script:appTitle = '臘腸狗桌寵 ' + $script:appVersion + '（旺旺）'
 try { $Host.UI.RawUI.WindowTitle = '旺旺（臘腸狗桌寵）- 關閉這個視窗會結束旺旺' } catch { }
 Add-Type -AssemblyName System.Windows.Forms
@@ -1311,6 +1311,28 @@ function Get-PetCursor {
     return $script:petCursor
 }
 
+function New-StartShortcut([string]$folder) {
+    # 開啟旺旺.lnk: starts START_Dachshund.cmd, with the start icon (start_icon.ico). Returns the shortcut path.
+    $cmd = Join-Path $PSScriptRoot 'START_Dachshund.cmd'
+    $ico = Join-Path $PSScriptRoot 'start_icon.ico'
+    if (-not (Test-Path -LiteralPath $cmd) -or -not (Test-Path -LiteralPath $ico)) { return '' }
+    $lnkPath = Join-Path $folder '開啟旺旺.lnk'
+    $shell = New-Object -ComObject WScript.Shell
+    try {
+        $lnk = $shell.CreateShortcut($lnkPath)
+        if ($lnk.TargetPath -eq $cmd -and $lnk.IconLocation -eq ($ico + ',0') -and (Test-Path -LiteralPath $lnkPath)) { return $lnkPath }
+        $lnk.TargetPath = $cmd
+        $lnk.WorkingDirectory = $PSScriptRoot
+        $lnk.IconLocation = $ico + ',0'
+        $lnk.Description = '開啟旺旺（臘腸狗桌寵）'
+        $lnk.WindowStyle = 7
+        $lnk.Save()
+    } finally {
+        [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($shell)
+    }
+    return $lnkPath
+}
+
 function Get-TrayIcon {
     if ($null -ne $script:trayIcon) { return $script:trayIcon }
     $ni = New-Object System.Windows.Forms.NotifyIcon
@@ -1504,14 +1526,14 @@ function Start-GlassBurst {
         if ($a2 -lt $a1) { $a2 += 2 * [Math]::PI }
         $r1 = $S * (0.04 + $rng.NextDouble() * 0.04)
         $r2 = $S * (0.10 + $rng.NextDouble() * 0.09)
-        $corner = @(@($a1, $r1), @($a1, $r2), @($a2, $r2 * 0.9), @($a2, $r1))
+        $corner = @(@($a1, $r1), @($a1, $r2), @($a2, ($r2 * 0.9)), @($a2, $r1))
         $shards += ,(New-GlassShard $corner $c $S $rng)
     }
     for ($i = 0; $i -lt 16; $i++) {
         $a = $rng.NextDouble() * 2 * [Math]::PI
         $r = $S * (0.03 + $rng.NextDouble() * 0.12)
         $sz = $S * (0.008 + $rng.NextDouble() * 0.018)
-        $corner = @(@($a, $r), @($a + $sz / $r, $r + $sz), @($a - $sz / $r, $r + $sz * 0.6))
+        $corner = @(@($a, $r), @(($a + $sz / $r), ($r + $sz)), @(($a - $sz / $r), ($r + $sz * 0.6)))
         $shards += ,(New-GlassShard $corner $c $S $rng)
     }
     $script:glassShards = $shards
@@ -1726,7 +1748,7 @@ function Invoke-DogSummon {
             return
         } catch {
             $null = Write-ErrorLog ('衝出來效果錯誤：' + $_.ToString())
-            Write-GlassCheck ('glass error: ' + $_.ToString())
+            Write-GlassCheck ('glass error: ' + $_.ToString() + ' @ line ' + $_.InvocationInfo.ScriptLineNumber + ': ' + $_.InvocationInfo.Line.Trim())
             Hide-GlassFx
             if ($script:dogAct -eq 'burst') { $script:dogAct = '' }
         }
@@ -4901,6 +4923,18 @@ try {
     })
     [void]$cms.Items.Add($miDot)
     $script:dotMenuItems += $miDot
+    $miDesk = New-Object System.Windows.Forms.ToolStripMenuItem('在桌面建立「開啟旺旺」捷徑')
+    $miDesk.Add_Click({
+        try {
+            $desk = [Environment]::GetFolderPath('Desktop')
+            $made = New-StartShortcut $desk
+            if ([string]::IsNullOrEmpty($made)) { Set-Bubble '找不到啟動檔或圖示，沒辦法建立捷徑' } else { Set-Bubble '桌面上多了「開啟旺旺」，下次點它就能叫我出來～' }
+        } catch {
+            $null = Write-ErrorLog ('桌面捷徑無法建立：' + $_.ToString())
+            Set-Bubble '桌面捷徑沒辦法建立（可能是公司電腦不允許）'
+        }
+    })
+    [void]$cms.Items.Add($miDesk)
 
     # Sizes in the same proportion as small : normal : large (x0.72 / x1.28 per step).
     $miSize = New-Object System.Windows.Forms.ToolStripMenuItem('尺寸')
@@ -5262,7 +5296,7 @@ try {
                     Update-GlassFx
                 } catch {
                     $null = Write-ErrorLog ('衝出來效果錯誤：' + $_.ToString())
-                    Write-GlassCheck ('glass error while playing: ' + $_.ToString())
+                    Write-GlassCheck ('glass error while playing: ' + $_.ToString() + ' @ line ' + $_.InvocationInfo.ScriptLineNumber + ': ' + $_.InvocationInfo.Line.Trim())
                     Hide-GlassFx
                 }
             }
@@ -5766,6 +5800,8 @@ try {
         } catch { $null = Write-ErrorLog ('顯示錯誤：' + $_.ToString()) }
     })
     try { (Get-TrayIcon).Visible = $true } catch { $null = Write-ErrorLog ('右下角圖示錯誤：' + $_.ToString()) }
+    # The start shortcut with 旺旺's start icon, next to START_Dachshund.cmd (kept up to date if the folder moved).
+    try { $null = New-StartShortcut $PSScriptRoot } catch { $null = Write-ErrorLog ('開啟旺旺捷徑無法建立：' + $_.ToString()) }
     if ($script:dotOn) {
         try { Set-DotButton $true $false } catch { $null = Write-ErrorLog ('浮動按鈕錯誤：' + $_.ToString()) }
     }

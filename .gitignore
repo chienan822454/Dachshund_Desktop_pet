@@ -2,3 +2,5 @@
 DachshundPet_Error_*.txt
 # Check log written when 旺旺 is called back from hiding
 glass_check.txt
+# Start shortcut that each PC makes for itself
+*.lnk
