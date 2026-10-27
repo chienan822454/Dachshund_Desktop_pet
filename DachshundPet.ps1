@@ -1,6 +1,6 @@
 ﻿#requires -Version 5.1
 # =============================================================================
-# 臘腸狗桌寵 V1.18.0 - 旺旺, a dachshund desktop pet (low-risk edition)
+# 臘腸狗桌寵 V1.19.0 - 旺旺, a dachshund desktop pet (low-risk edition)
 #   Made from Fighter V24.7: only the dachshund is kept.
 #   * Offline only: this program contains no network code.
 #   * Writes only into its own folder, and only when something goes wrong
@@ -20,7 +20,7 @@
 # =============================================================================
 param([switch]$Classic)
 $ErrorActionPreference = 'Stop'
-$script:appVersion = 'V1.18.0'
+$script:appVersion = 'V1.19.0'
 $script:appTitle = '臘腸狗桌寵 ' + $script:appVersion + '（旺旺）'
 try { $Host.UI.RawUI.WindowTitle = '旺旺（臘腸狗桌寵）- 關閉這個視窗會結束旺旺' } catch { }
 Add-Type -AssemblyName System.Windows.Forms
@@ -1084,6 +1084,174 @@ function Set-PetSize([int]$size) {
 # -----------------------------------------------------------------------------
 # Hiding for a meeting or screen sharing: a dachshund icon by the clock brings it back
 # -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Floating button: a small round 旺旺 button on top of every window.
+# Right-click = the 旺旺 menu, left-click = call 旺旺 over, drag = move the button.
+# -----------------------------------------------------------------------------
+function Save-DotSetting {
+    try {
+        if ([string]::IsNullOrEmpty($script:dotFile)) { return }
+        $dir = Split-Path -Parent $script:dotFile
+        if (-not (Test-Path -LiteralPath $dir)) { $null = New-Item -ItemType Directory -Path $dir -Force }
+        $state = if ($script:dotOn) { 'on' } else { 'off' }
+        $text = $state + ' ' + [int]$script:dotPos.X + ' ' + [int]$script:dotPos.Y
+        [System.IO.File]::WriteAllText($script:dotFile, $text, [System.Text.UTF8Encoding]::new($false))
+    } catch {
+        $null = Write-ErrorLog ('浮動按鈕的設定沒辦法記下來：' + $_.ToString())
+    }
+}
+
+function Import-DotSetting {
+    # Default: on, near the bottom right corner (above the clock).
+    $size = Get-Scaled 44
+    $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+    $script:dotPos = [System.Drawing.Point]::new($wa.Right - $size - (Get-Scaled 24), $wa.Bottom - $size - (Get-Scaled 24))
+    $script:dotOn = $true
+    try {
+        if ([string]::IsNullOrEmpty($script:dotFile) -or -not (Test-Path -LiteralPath $script:dotFile)) { return }
+        $parts = @(([System.IO.File]::ReadAllText($script:dotFile)).Trim() -split '\s+')
+        if ($parts.Count -lt 3) { return }
+        $script:dotOn = ([string]$parts[0] -ne 'off')
+        $p = [System.Drawing.Point]::new([int]$parts[1], [int]$parts[2])
+        # Only when it is still on one of the screens (screens may have changed since).
+        foreach ($sc in [System.Windows.Forms.Screen]::AllScreens) {
+            $box = $sc.WorkingArea
+            if ($p.X -ge $box.Left -and $p.Y -ge $box.Top -and ($p.X + $size) -le $box.Right -and ($p.Y + $size) -le $box.Bottom) {
+                $script:dotPos = $p
+                break
+            }
+        }
+    } catch { }
+}
+
+function Get-DotImage([int]$size) {
+    # Round orange-brown button with a white ring and 旺旺's head (wangwang.ico) in the middle.
+    $bmp = [System.Drawing.Bitmap]::new($size, $size)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    try {
+        $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+        $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+        $g.Clear([System.Drawing.Color]::White)
+        $fill = [System.Drawing.SolidBrush]::new([System.Drawing.Color]::FromArgb(196, 120, 52))
+        $ring = [System.Drawing.Pen]::new([System.Drawing.Color]::White, [single][Math]::Max(2.0, $size / 14.0))
+        try {
+            $g.FillEllipse($fill, 1, 1, $size - 3, $size - 3)
+            $g.DrawEllipse($ring, 2, 2, $size - 5, $size - 5)
+        } finally {
+            $fill.Dispose()
+            $ring.Dispose()
+        }
+        $icoPath = Join-Path $PSScriptRoot 'wangwang.ico'
+        if (Test-Path -LiteralPath $icoPath) {
+            $inner = [int]($size * 0.68)
+            $ico = $null
+            try {
+                $ico = [System.Drawing.Icon]::new($icoPath, $inner, $inner)
+                $icoBmp = $ico.ToBitmap()
+                try {
+                    $off = [int](($size - $inner) / 2)
+                    $g.DrawImage($icoBmp, [System.Drawing.Rectangle]::new($off, $off, $inner, $inner))
+                } finally {
+                    $icoBmp.Dispose()
+                }
+            } catch { } finally {
+                if ($null -ne $ico) { $ico.Dispose() }
+            }
+        }
+    } finally {
+        $g.Dispose()
+    }
+    return $bmp
+}
+
+function Initialize-DotButton {
+    if ($null -ne $script:dotForm) { return }
+    $size = Get-Scaled 44
+    $f = New-Object System.Windows.Forms.Form
+    $f.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
+    $f.ShowInTaskbar = $false
+    $f.TopMost = $true
+    $f.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
+    $f.Size = [System.Drawing.Size]::new($size, $size)
+    $f.Location = $script:dotPos
+    $f.BackColor = [System.Drawing.Color]::White
+    $f.BackgroundImage = Get-DotImage $size
+    $f.Opacity = 0.9
+    $f.Text = '旺旺浮動按鈕'
+    $round = [System.Drawing.Drawing2D.GraphicsPath]::new()
+    $round.AddEllipse(0, 0, $size, $size)
+    $f.Region = [System.Drawing.Region]::new($round)
+    $round.Dispose()
+    $tip = New-Object System.Windows.Forms.ToolTip
+    $tip.SetToolTip($f, '旺旺（右鍵：旺旺的選單；左鍵：叫旺旺過來；拖曳：移動按鈕）')
+    $script:dotTip = $tip
+    $f.Add_MouseDown({
+        param($sender, $e)
+        if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
+            $script:dotDown = $true
+            $script:dotDragged = $false
+            $script:dotGrab = [System.Windows.Forms.Cursor]::Position
+            $script:dotStart = $script:dotForm.Location
+        }
+    })
+    $f.Add_MouseMove({
+        param($sender, $e)
+        if (-not $script:dotDown) { return }
+        $cur = [System.Windows.Forms.Cursor]::Position
+        $dx = $cur.X - $script:dotGrab.X
+        $dy = $cur.Y - $script:dotGrab.Y
+        if (-not $script:dotDragged -and ([Math]::Abs($dx) + [Math]::Abs($dy)) -lt (Get-Scaled 5)) { return }
+        $script:dotDragged = $true
+        $script:dotForm.Location = [System.Drawing.Point]::new($script:dotStart.X + $dx, $script:dotStart.Y + $dy)
+    })
+    $f.Add_MouseUp({
+        param($sender, $e)
+        try {
+            if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Right) {
+                $script:cms.Show($script:dotForm, [System.Drawing.Point]::new($e.X, $e.Y))
+                return
+            }
+            if ($e.Button -ne [System.Windows.Forms.MouseButtons]::Left) { return }
+            $wasDrag = $script:dotDragged
+            $script:dotDown = $false
+            $script:dotDragged = $false
+            if ($wasDrag) {
+                # Keep the whole button on a screen, then remember where it is.
+                $loc = $script:dotForm.Location
+                $box = [System.Windows.Forms.Screen]::FromPoint([System.Windows.Forms.Cursor]::Position).WorkingArea
+                $sz = $script:dotForm.Width
+                $x = [Math]::Min([Math]::Max($loc.X, $box.Left), $box.Right - $sz)
+                $y = [Math]::Min([Math]::Max($loc.Y, $box.Top), $box.Bottom - $sz)
+                $script:dotForm.Location = [System.Drawing.Point]::new($x, $y)
+                $script:dotPos = $script:dotForm.Location
+                Save-DotSetting
+                return
+            }
+            Invoke-DogSummon
+        } catch { $null = Write-ErrorLog ('浮動按鈕錯誤：' + $_.ToString()) }
+    })
+    $f.Add_MouseEnter({ try { $script:dotForm.Opacity = 1.0 } catch { } })
+    $f.Add_MouseLeave({ try { $script:dotForm.Opacity = 0.9 } catch { } })
+    $script:dotForm = $f
+}
+
+function Set-DotButton([bool]$on, [bool]$say = $true) {
+    $script:dotOn = $on
+    foreach ($it in @($script:dotMenuItems)) { try { $it.Checked = $on } catch { } }
+    if ($on) {
+        Initialize-DotButton
+        $script:dotForm.Location = $script:dotPos
+        if (-not $script:dotForm.Visible) { $script:dotForm.Show() }
+        $script:dotForm.TopMost = $false
+        $script:dotForm.TopMost = $true
+        if ($say) { Set-Bubble '浮動按鈕出現了！右鍵點它就能開我的選單～' }
+    } else {
+        if ($null -ne $script:dotForm) { $script:dotForm.Hide() }
+        if ($say) { Set-Bubble '好，浮動按鈕收起來了（右鍵點我或右下角頭像可以再打開）' }
+    }
+    Save-DotSetting
+}
+
 function Get-TrayIcon {
     if ($null -ne $script:trayIcon) { return $script:trayIcon }
     $ni = New-Object System.Windows.Forms.NotifyIcon
@@ -1104,6 +1272,15 @@ function Get-TrayIcon {
     $trayMenu = New-Object System.Windows.Forms.ContextMenuStrip
     $trayBack = $trayMenu.Items.Add('叫旺旺過來')
     $trayBack.Add_Click({ try { Invoke-DogSummon } catch { $null = Write-ErrorLog ('叫旺旺過來錯誤：' + $_.ToString()) } })
+    $trayDot = New-Object System.Windows.Forms.ToolStripMenuItem('顯示浮動按鈕（右鍵開旺旺選單）')
+    $trayDot.CheckOnClick = $true
+    $trayDot.Checked = [bool]$script:dotOn
+    $trayDot.Add_Click({
+        param($sender, $e)
+        try { Set-DotButton ([bool]$sender.Checked) } catch { $null = Write-ErrorLog ('浮動按鈕錯誤：' + $_.ToString()) }
+    })
+    [void]$trayMenu.Items.Add($trayDot)
+    $script:dotMenuItems += $trayDot
     $trayQuit = $trayMenu.Items.Add('關閉旺旺')
     $trayQuit.Add_Click({ $script:form.Close() })
     $ni.ContextMenuStrip = $trayMenu
@@ -3897,6 +4074,16 @@ try {
     if (-not [string]::IsNullOrEmpty($script:alarmFile)) { $script:birthdayFile = Join-Path (Split-Path -Parent $script:alarmFile) 'birthday.txt' }
     $script:birthdayMD = ''
     Import-Birthday
+    $script:dotFile = ''
+    if (-not [string]::IsNullOrEmpty($script:alarmFile)) { $script:dotFile = Join-Path (Split-Path -Parent $script:alarmFile) 'dot.txt' }
+    $script:dotForm = $null
+    $script:dotTip = $null
+    $script:dotMenuItems = @()
+    $script:dotDown = $false
+    $script:dotDragged = $false
+    $script:dotGrab = [System.Drawing.Point]::Empty
+    $script:dotStart = [System.Drawing.Point]::Empty
+    Import-DotSetting
     $script:awayEnabled = $script:idleAvailable
     $script:awaySeen = $false
     $script:awayBubble = $false
@@ -4521,6 +4708,15 @@ try {
         if ($sender.Checked) { Set-Bubble '已啟用最上層顯示' } else { Set-Bubble '已關閉最上層顯示' }
     })
     [void]$cms.Items.Add($miTopMost)
+    $miDot = New-Object System.Windows.Forms.ToolStripMenuItem('顯示浮動按鈕（右鍵開旺旺選單，不用點旺旺）')
+    $miDot.CheckOnClick = $true
+    $miDot.Checked = [bool]$script:dotOn
+    $miDot.Add_Click({
+        param($sender, $e)
+        try { Set-DotButton ([bool]$sender.Checked) } catch { $null = Write-ErrorLog ('浮動按鈕錯誤：' + $_.ToString()) }
+    })
+    [void]$cms.Items.Add($miDot)
+    $script:dotMenuItems += $miDot
 
     # Sizes in the same proportion as small : normal : large (x0.72 / x1.28 per step).
     $miSize = New-Object System.Windows.Forms.ToolStripMenuItem('尺寸')
@@ -5353,6 +5549,8 @@ try {
         try { if ($null -ne $script:glassPlayer) { $script:glassPlayer.Dispose() } } catch { }
         try { foreach ($bp in @($script:barkPlayers.Values)) { if ($null -ne $bp) { $bp.Stop(); $bp.Dispose() } } } catch { }
         try { if ($null -ne $script:trayIcon) { $script:trayIcon.Visible = $false; $script:trayIcon.Dispose() } } catch { }
+        try { if ($null -ne $script:dotForm) { $script:dotForm.Close(); $script:dotForm.Dispose() } } catch { }
+        try { if ($null -ne $script:dotTip) { $script:dotTip.Dispose() } } catch { }
         try { $script:instanceMutex.ReleaseMutex() } catch { }
     })
     $form.Add_Shown({
@@ -5373,6 +5571,9 @@ try {
         } catch { $null = Write-ErrorLog ('顯示錯誤：' + $_.ToString()) }
     })
     try { (Get-TrayIcon).Visible = $true } catch { $null = Write-ErrorLog ('右下角圖示錯誤：' + $_.ToString()) }
+    if ($script:dotOn) {
+        try { Set-DotButton $true $false } catch { $null = Write-ErrorLog ('浮動按鈕錯誤：' + $_.ToString()) }
+    }
     $timer.Start()
     [System.Windows.Forms.Application]::Run($form)
 }
