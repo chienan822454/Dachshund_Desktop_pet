@@ -1,6 +1,6 @@
 ﻿#requires -Version 5.1
 # =============================================================================
-# 臘腸狗桌寵 V1.20.0 - 旺旺, a dachshund desktop pet (low-risk edition)
+# 臘腸狗桌寵 V1.21.0 - 旺旺, a dachshund desktop pet (low-risk edition)
 #   Made from Fighter V24.7: only the dachshund is kept.
 #   * Offline only: this program contains no network code.
 #   * Writes only into its own folder, and only when something goes wrong
@@ -20,7 +20,7 @@
 # =============================================================================
 param([switch]$Classic)
 $ErrorActionPreference = 'Stop'
-$script:appVersion = 'V1.20.0'
+$script:appVersion = 'V1.21.0'
 $script:appTitle = '臘腸狗桌寵 ' + $script:appVersion + '（旺旺）'
 try { $Host.UI.RawUI.WindowTitle = '旺旺（臘腸狗桌寵）- 關閉這個視窗會結束旺旺' } catch { }
 Add-Type -AssemblyName System.Windows.Forms
@@ -923,7 +923,12 @@ function Step-Roam {
     # When chasing the mouse, aim next to the pointer and re-aim about once a second.
     $circleChase = ($script:clockTick -lt $script:circleChaseUntil)
     $summonRun = ($script:clockTick -lt $script:summonRunUntil)
-    $chasing = [bool]$script:dogChaseMouse -or [bool]$script:begging -or $circleChase -or $summonRun
+    $bedRun = ($script:clockTick -lt $script:bedWalkUntil)
+    if ($bedRun) {
+        $script:roamTarget = Get-BedSpot
+        $summonRun = $false
+    }
+    $chasing = ([bool]$script:dogChaseMouse -or [bool]$script:begging -or $circleChase -or $summonRun) -and -not $bedRun
     if ($chasing -and ($script:clockTick % 15) -eq 0) { $script:roamTarget = $null }
     if ($null -eq $script:roamTarget) {
         $b = Get-RoamBounds
@@ -965,6 +970,16 @@ function Step-Roam {
         $script:roamY = [double]$script:roamTarget.Y
         $script:roamTarget = $null
         $script:roamMoving = $false
+        if ($bedRun) {
+            # At the dog bed in the corner: curls up in it.
+            $script:bedWalkUntil = 0
+            $script:bedArrived = $true
+            $bw = $script:bedWalk
+            if ($null -eq $bw) { $bw = @{ Manual = $true; Night = $false } }
+            Start-DogSleep ([bool]$bw.Manual) 'bed_00' ([bool]$bw.Night)
+            $script:roamWalkTicks = 0
+            return
+        }
         if ($summonRun) {
             # Ran over after breaking out of the screen: a happy hop next to the pointer.
             $script:summonRunUntil = 0
@@ -1460,7 +1475,7 @@ function Start-GlassBurst {
     $script:dogNightSleep = $false
     $script:dogAct = 'burst'
     $script:dogActTick = 0
-    $script:dogActLen = 26
+    $script:dogActLen = 52
     $script:actionMode = 'idle'
     $script:actionTick = 0
     $script:form.Location = [System.Drawing.Point]::new(-25000, -25000)
@@ -1499,14 +1514,14 @@ function New-GlassShard($corner, [double]$c, [double]$S, $rng) {
 }
 
 function Update-GlassFx {
-    # One picture of the breaking glass per animation tick (about 1.8 seconds in all).
+    # The breaking glass moves half a step per animation tick (about 3.7 seconds in all), slow enough to see.
     if ($script:glassTick -lt 0) { return }
-    $g0 = $script:glassTick
+    $g0 = $script:glassTick / 2.0
     $script:glassTick++
     if ($g0 -gt 30) { Hide-GlassFx; return }
     $S = $script:glassSize
     $c = $S / 2.0
-    if ($g0 -eq 4 -and $script:autoBarkSound) {
+    if (($script:glassTick - 1) -eq 8 -and $script:autoBarkSound) {
         # The sound of breaking glass (only when 旺旺's sounds are switched on).
         try {
             if ($null -eq $script:glassPlayer) {
@@ -1526,7 +1541,7 @@ function Update-GlassFx {
             # The flash of the impact.
             if ($g0 -le 1) {
                 $fr = [float]($S * (0.04 + 0.03 * $g0))
-                $fb = [System.Drawing.SolidBrush]::new([System.Drawing.Color]::FromArgb(170 - 60 * $g0, 255, 255, 255))
+                $fb = [System.Drawing.SolidBrush]::new([System.Drawing.Color]::FromArgb([int](170 - 60 * $g0), 255, 255, 255))
                 try { $g.FillEllipse($fb, [float]($c - $fr), [float]($c - $fr), [float](2 * $fr), [float](2 * $fr)) } finally { $fb.Dispose() }
             }
             # The hole, fading as 旺旺 comes through.
@@ -1583,11 +1598,11 @@ function Update-GlassFx {
                 try {
                     foreach ($sh in $script:glassShards) {
                         if ($g0 -gt 4) {
-                            $sh.X += $sh.VX
-                            $sh.Y += $sh.VY
-                            $sh.VY += $S * 0.0028
-                            $sh.VX *= 0.97
-                            $sh.Rot += $sh.VR
+                            $sh.X += $sh.VX * 0.5
+                            $sh.Y += $sh.VY * 0.5
+                            $sh.VY += $S * 0.0014
+                            $sh.VX *= 0.985
+                            $sh.Rot += $sh.VR * 0.5
                         }
                         $cn = $sh.DX.Count
                         $poly = New-Object 'System.Drawing.PointF[]' $cn
@@ -1624,9 +1639,22 @@ function Invoke-DogSummon {
     # it jumps out there, and then runs over to the mouse pointer (the breaking glass can be switched off in 互動設定).
     $wasBehind = [bool]$script:dogBehind
     if ($wasBehind) { Stop-DogBehind }
+    $script:bedWalkUntil = 0
     $burst = $false
-    if ($script:glassEnabled -and $script:smoothMode -and -not $script:dogHidden -and $script:glassTick -lt 0 -and $script:dogAct -ne 'burst') {
-        try { $burst = Test-DogCovered } catch { $burst = $false; $null = Write-ErrorLog ('視窗檢查錯誤：' + $_.ToString()) }
+    $canBurst = ($script:glassEnabled -and $script:glassAvailable -and $script:smoothMode -and -not $script:dogHidden -and $script:glassTick -lt 0 -and $script:dogAct -ne 'burst')
+    if ($canBurst) {
+        if ($wasBehind) {
+            # It was hiding behind the windows on purpose: always out through the glass.
+            $burst = $true
+        } else {
+            try { $burst = Test-DogCovered } catch { $burst = $false; $null = Write-ErrorLog ('視窗檢查錯誤：' + $_.ToString()) }
+        }
+    }
+    $noGlass = ''
+    if ($wasBehind -and -not $canBurst) {
+        if (-not $script:glassEnabled) { $noGlass = '（打破螢幕的效果在互動設定裡關掉了）' }
+        elseif (-not $script:smoothMode -or -not $script:glassAvailable) { $noGlass = '（這台電腦是用一般顯示啟動，沒有打破螢幕的效果）' }
+        if (-not [string]::IsNullOrEmpty($noGlass)) { $null = Write-ErrorLog ('叫旺旺出來時沒有打破螢幕：' + $noGlass + ' smooth=' + $script:smoothMode + ' glass=' + $script:glassAvailable) }
     }
     if ($script:dogHidden) { Show-Dog '我在這裡！汪～' }
     if ($script:isDragging) { return }
@@ -1647,7 +1675,7 @@ function Invoke-DogSummon {
             Start-GlassBurst
             if ($script:outfitLights.Count -gt 0) { try { Start-PatrolSiren $true } catch { } }
             # ... then it runs over to the pointer (starts when the glass is broken and it has landed).
-            $script:summonRunUntil = $script:clockTick + 40 + 300
+            $script:summonRunUntil = $script:clockTick + 70 + 300
             return
         } catch {
             $null = Write-ErrorLog ('衝出來效果錯誤：' + $_.ToString())
@@ -1663,7 +1691,7 @@ function Invoke-DogSummon {
         $script:roamPauseTicks = 0
         $script:summonRunUntil = $script:clockTick + 300
         $script:viewDirty = $true
-        Set-Bubble '我來了～汪！'
+        Set-Bubble ('我來了～汪！' + $noGlass)
         return
     }
     $cur = [System.Windows.Forms.Cursor]::Position
@@ -1711,6 +1739,7 @@ function Start-DogBehind([int]$minutes) {
     if ($script:alarmRinging) { Stop-AlarmRing '' }
     $script:behindUntil = if ($minutes -gt 0) { (Get-Date).AddMinutes($minutes) } else { [DateTime]::MaxValue }
     $script:dogBehind = $true
+    $script:bedWalkUntil = 0
     $script:begging = $false
     $script:circleChaseUntil = 0
     $script:summonRunUntil = 0
@@ -3651,6 +3680,27 @@ function Start-DogSleep([bool]$manual, [string]$style = '', [bool]$night = $fals
         }
         $style = [string]$choices[$script:rng.Next(0, $choices.Count)]
     }
+    # The dog bed is in the bottom left corner: walk there first, then lie down in it.
+    if ($style -eq 'bed_00' -and -not $script:bedArrived) {
+        $spot = Get-BedSpot
+        $dx = [Math]::Abs([double]$script:baseLocation.X - $spot.X)
+        $dy = [Math]::Abs([double]$script:baseLocation.Y - $spot.Y)
+        if (($dx + $dy) -gt (Get-Scaled 12)) {
+            $script:bedWalk = @{ Manual = $manual; Night = $night }
+            $script:bedWalkUntil = $script:clockTick + 1200
+            $script:roamTarget = $spot
+            $script:roamPauseTicks = 0
+            $script:begging = $false
+            $script:circleChaseUntil = 0
+            $script:summonRunUntil = 0
+            if ($script:dogAct -ne '') { $script:dogAct = '' }
+            $script:actionMode = 'idle'
+            if ($night) { Set-Bubble '好睏喔…旺旺回狗窩睡覺囉～' } else { Set-Bubble '旺旺要回狗窩囉～' }
+            return
+        }
+    }
+    $script:bedArrived = $false
+    $script:bedWalkUntil = 0
     $script:dogSleepPose = $style
     $script:dogSleeping = $true
     $script:bellyRubTicks = 0
@@ -3677,6 +3727,16 @@ function Start-DogSleep([bool]$manual, [string]$style = '', [bool]$night = $fals
     elseif ($style -eq 'curl_00') { Set-Bubble '旺旺縮成一團睡～' }
     elseif ($style -eq 'bed_00') { Set-Bubble '旺旺窩進狗窩囉～' }
     else { Set-Bubble '呼～旺旺想睡了…' }
+}
+
+function Get-BedSpot {
+    # Bottom left corner of the screen 旺旺 is on (gravity mode: the left end of the taskbar).
+    $b = Get-RoamBounds
+    if ($script:gravityMode) {
+        $gb = Get-GroundBounds
+        return [System.Drawing.Point]::new([int]$gb[0], [int]$gb[3])
+    }
+    return [System.Drawing.Point]::new([int]$b[0], [int]$b[3])
 }
 
 function Stop-DogSleep([bool]$stretch, [string]$say = '汪～旺旺睡飽了！') {
@@ -3933,7 +3993,7 @@ function Get-DogFramePath {
         'burst' {
             # Landed after breaking out: happy face with the tongue out.
             $burstWag = @(0, 1, 2, 1)
-            if ($t -ge 11 -and $script:dogHappyFrames.Count -eq 3) { return $script:dogHappyFrames[$burstWag[$t % 4]] }
+            if ($t -ge 22 -and $script:dogHappyFrames.Count -eq 3) { return $script:dogHappyFrames[$burstWag[$t % 4]] }
             return $null
         }
         'wait' {
@@ -4064,6 +4124,9 @@ try {
     $script:behindTick = 0
     $script:summonRunUntil = 0
     $script:topMostWanted = $true
+    $script:bedWalkUntil = 0
+    $script:bedWalk = $null
+    $script:bedArrived = $false
     $script:trayTextNormal = '旺旺（點一下叫牠過來）'
     $script:glassEnabled = $true
     $script:outfitLights = @{}
@@ -5274,9 +5337,9 @@ try {
                         $xOffset = 0
                         $yOffset = 0
                         # The glass layer is gone early (an error, hidden ...): shows up straight away.
-                        if ($t -lt 11 -and $script:glassTick -lt 0) { $script:dogActTick = 11; $t = 11 }
-                        if ($t -ge 11) { $yOffset = [int]([Math]::Abs([Math]::Sin($t / 1.3)) * -6) }
-                        if ($t -eq 11) {
+                        if ($t -lt 22 -and $script:glassTick -lt 0) { $script:dogActTick = 22; $t = 22 }
+                        if ($t -ge 22) { $yOffset = [int]([Math]::Abs([Math]::Sin($t / 1.3)) * -6) }
+                        if ($t -eq 22) {
                             # Landed: in front of the broken glass from now on.
                             $script:form.TopMost = -not $script:topMostWanted
                             $script:form.TopMost = $true
@@ -5499,7 +5562,7 @@ try {
             }
 
             # 5) Free roaming (not during an action)
-            if (($script:roamEnabled -or $script:clockTick -lt $script:summonRunUntil) -and -not $script:isDragging -and -not $menuOpen -and $script:dogAct -eq '' -and $script:focusState -ne 'focus') {
+            if (($script:roamEnabled -or $script:clockTick -lt $script:summonRunUntil -or $script:clockTick -lt $script:bedWalkUntil) -and -not $script:isDragging -and -not $menuOpen -and $script:dogAct -eq '' -and $script:focusState -ne 'focus') {
                 try {
                     Step-Roam
                 } catch {
@@ -5553,7 +5616,7 @@ try {
             # 7) Position and picture
             $dogLoc = [System.Drawing.Point]::new([int]($script:baseLocation.X + (Get-Scaled ($xOffset * $script:sizeRatio))), [int]($script:baseLocation.Y + (Get-Scaled ($yOffset * $script:sizeRatio))))
             # Breaking out of the screen: out of sight until it lands.
-            if ($script:dogAct -eq 'burst' -and $script:dogActTick -lt 11) { $dogLoc = [System.Drawing.Point]::new(-25000, -25000) }
+            if ($script:dogAct -eq 'burst' -and $script:dogActTick -lt 22) { $dogLoc = [System.Drawing.Point]::new(-25000, -25000) }
             $script:form.Location = $dogLoc
             $displayPath = $null
             $dogPath = Get-DogFramePath
