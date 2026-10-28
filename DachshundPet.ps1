@@ -191,7 +191,7 @@ if (-not [string]::IsNullOrEmpty($UpdateMode)) {
     }
     exit 0
 }
-$script:appVersion = 'V1.24.1'
+$script:appVersion = 'V1.25.0'
 $script:appTitle = '臘腸狗桌寵 ' + $script:appVersion + '（旺旺）'
 try { $Host.UI.RawUI.WindowTitle = '旺旺（臘腸狗桌寵）- 關閉這個視窗會結束旺旺' } catch { }
 Add-Type -AssemblyName System.Windows.Forms
@@ -795,7 +795,12 @@ function Get-SirenLoopPlayer {
 
 function Stop-SirenLoop {
     # (Not while another sound is playing: stopping would cut that sound off too.)
-    if ($script:sirenLooping -and $null -ne $script:sirenLoopPlayer -and $script:clockTick -ge $script:sirenHoldTick) { try { $script:sirenLoopPlayer.Stop() } catch { } }
+    if ($script:sirenLooping -and $script:clockTick -ge $script:sirenHoldTick) {
+        $lp = $script:sirenLoopPlayer
+        if ($script:loopKey -eq 'snore' -and $script:dogSoundPlayers.ContainsKey('snore_loop')) { $lp = $script:dogSoundPlayers['snore_loop'] }
+        if ($null -ne $lp) { try { $lp.Stop() } catch { } }
+    }
+    $script:loopKey = ''
     $script:sirenResumeTick = 0
     $script:sirenLooping = $false
     $script:sirenIdleTicks = 0
@@ -804,23 +809,31 @@ function Stop-SirenLoop {
 function Update-SirenLoop([bool]$running) {
     # 警察巡邏車汪汪: the siren sounds all the way while it runs and stops a moment after it stops running.
     # Another sound (a bark, the breaking glass) cuts it off; then it starts again when that sound is over.
+    # The same sound channel also plays 旺旺's soft snoring while it sleeps (when 旺旺的小聲音 is on).
     $want = ($running -and $script:sirenEnabled -and $script:outfitLights.Count -gt 0 -and -not $script:dogHidden)
-    if ($want) {
-        $script:sirenIdleTicks = 0
+    $snore = ($script:dogSounds -and $script:dogSleeping -and $script:dogAct -eq 'sleep' -and $script:dogActTick -ge ($script:dogSleepPre + 25) -and
+        $script:bellyRubTicks -le 0 -and -not $script:dogHidden -and -not $script:alarmRinging)
+    if ($want -or $snore) {
+        $key = 'snore'
+        if ($want) { $key = 'siren'; $script:sirenIdleTicks = 0 }
+        if ($script:sirenLooping -and $script:loopKey -ne $key) { Stop-SirenLoop }
         if (-not $script:sirenLooping -or ($script:sirenResumeTick -gt 0 -and $script:clockTick -ge $script:sirenResumeTick)) {
             $script:sirenResumeTick = 0
             if ($script:clockTick -lt $script:sirenHoldTick) { return }
-            $lp = Get-SirenLoopPlayer
+            $lp = $null
+            if ($key -eq 'siren') { $lp = Get-SirenLoopPlayer } else { $lp = Get-DogSoundPlayer 'snore_loop' }
             if ($null -eq $lp) { return }
             try {
                 $lp.PlayLooping()
                 $script:sirenLooping = $true
+                $script:loopKey = $key
             } catch {
                 $script:sirenLooping = $false
             }
         }
         return
     }
+    if ($script:sirenLooping -and $script:loopKey -eq 'snore') { Stop-SirenLoop; return }
     if (-not $script:sirenLooping) { return }
     $script:sirenIdleTicks++
     if ($script:sirenIdleTicks -ge 8 -or -not $script:sirenEnabled -or $script:outfitLights.Count -eq 0 -or $script:dogHidden) { Stop-SirenLoop }
@@ -1141,6 +1154,599 @@ function Update-UpdWatch {
     if ($script:updManual) { Set-Bubble '連不上 GitHub，等一下再試試～（可能是網路或公司防火牆擋住了）' }
 }
 
+# -----------------------------------------------------------------------------
+# 旺旺的小聲音: chewing (eating, jerky), lapping water, snoring while asleep. Soft, and can be switched off.
+# -----------------------------------------------------------------------------
+function Get-DogSoundPlayer([string]$name) {
+    if ($script:dogSoundPlayers.ContainsKey($name)) { return $script:dogSoundPlayers[$name] }
+    $script:dogSoundPlayers[$name] = $null
+    $wav = Join-Path $PSScriptRoot ('sounds\' + $name + '.wav')
+    if (-not (Test-Path -LiteralPath $wav)) { return $null }
+    try {
+        $p = New-Object System.Media.SoundPlayer($wav)
+        $p.Load()
+        $script:dogSoundPlayers[$name] = $p
+    } catch {
+        $null = Write-ErrorLog ('聲音無法播放：' + $name + ' ' + $_.ToString())
+    }
+    return $script:dogSoundPlayers[$name]
+}
+
+function Invoke-DogSound([string]$name, [double]$seconds) {
+    if (-not $script:dogSounds -or $script:dogHidden) { return }
+    if ($script:sirenLooping -and $script:loopKey -eq 'siren') { return }
+    $p = Get-DogSoundPlayer $name
+    if ($null -eq $p) { return }
+    try {
+        $p.Play()
+        $script:sirenLooping = $false
+        Hold-SirenLoop $seconds
+    } catch { }
+}
+
+function Invoke-ActSound([int]$t) {
+    # Called every tick of an action: the chewing and lapping sounds at the right moments.
+    switch ($script:dogAct) {
+        'eat' { if ($t -eq 8 -or $t -eq 46) { Invoke-DogSound 'chew' 1.5 } }
+        'drink' { if ($t -eq 5 -or $t -eq 30) { Invoke-DogSound 'lap' 1.7 } }
+        'jerky' {
+            if ($script:jeatPlan.Count -eq 0) {
+                if ($t -eq 16 -or $t -eq 40) { Invoke-DogSound 'chew' 1.5 }
+            } elseif ($t -ge 14) {
+                $hit = Get-JerkyEatStep ($t - 14)
+                if ($null -ne $hit -and [int]$hit[1] -eq 0) {
+                    $pose = [string]$hit[0][0]
+                    if (($pose -eq 'gnaw' -or $pose -eq 'chew' -or $pose -eq 'chew2') -and ($t - $script:chewSoundTick) -ge 26) {
+                        $script:chewSoundTick = $t
+                        Invoke-DogSound 'chew' 1.5
+                    }
+                }
+            }
+        }
+    }
+}
+
+# -----------------------------------------------------------------------------
+# 心情: 旺旺 remembers how much attention it gets (0-100, %APPDATA%\DachshundPet\mood.txt).
+# Petting, treats, water, jerky and tricks raise it; being left alone for a long time lowers it slowly.
+# Very happy: it likes to stay near the mouse pointer. Very low and left alone: it sulks (lies with its back to you).
+# -----------------------------------------------------------------------------
+function Import-DogMood {
+    $script:affection = 60
+    try {
+        if (-not [string]::IsNullOrEmpty($script:moodFile) -and (Test-Path -LiteralPath $script:moodFile)) {
+            $v = 0
+            if ([int]::TryParse(([System.IO.File]::ReadAllText($script:moodFile)).Trim(), [ref]$v)) { $script:affection = [Math]::Max(0, [Math]::Min(100, $v)) }
+        }
+    } catch { $null = Write-ErrorLog ('心情無法讀取：' + $_.ToString()) }
+}
+
+function Save-DogMood {
+    try {
+        if ([string]::IsNullOrEmpty($script:moodFile)) { return }
+        $dir = Split-Path -Parent $script:moodFile
+        if (-not (Test-Path -LiteralPath $dir)) { [void](New-Item -ItemType Directory -Path $dir -Force) }
+        [System.IO.File]::WriteAllText($script:moodFile, [string]$script:affection, [System.Text.UTF8Encoding]::new($false))
+    } catch { $null = Write-ErrorLog ('心情無法儲存：' + $_.ToString()) }
+}
+
+function Add-DogMood([int]$n) {
+    $script:affection = [Math]::Max(0, [Math]::Min(100, $script:affection + $n))
+    if ($n -gt 0) { $script:moodDecayAt = (Get-Date).AddMinutes(15) }
+    Save-DogMood
+}
+
+function Get-DogMoodText {
+    $hearts = [int][Math]::Round($script:affection / 20.0)
+    $txt = ('♥' * $hearts) + ('♡' * (5 - $hearts))
+    $word = '普通'
+    if ($script:affection -ge 80) { $word = '超黏你' } elseif ($script:affection -ge 60) { $word = '很開心' } elseif ($script:affection -le 20) { $word = '鬧彆扭中' } elseif ($script:affection -le 40) { $word = '有點寂寞' }
+    return ('旺旺的心情：' + $txt + '（' + $word + '）')
+}
+
+function Update-DogMood {
+    # Every 3 seconds: a little lower after 15 minutes without attention; sulks when very low and left alone.
+    $now = Get-Date
+    if ($script:dogSleeping -or $script:dogHidden -or $script:dogBehind -or $script:awaySeen) { return }
+    if ($now -ge $script:moodDecayAt) {
+        $script:moodDecayAt = $now.AddMinutes(15)
+        if (($script:clockTick - $script:lastInteractTick) -gt 15000) { Add-DogMood -3 }
+    }
+    if ($script:affection -le 25 -and $now -ge $script:sulkNextAt -and ($script:clockTick - $script:lastInteractTick) -gt 6000 -and
+        $script:dogAct -eq '' -and $script:actionMode -eq 'idle' -and -not $script:isDragging -and $script:focusState -ne 'focus' -and (Test-DogAction 'sulk')) {
+        $script:sulkNextAt = $now.AddMinutes(30)
+        $cur = [System.Windows.Forms.Cursor]::Position
+        $cx = $script:baseLocation.X + $script:form.Width / 2.0
+        Start-DogAction 'sulk' ''
+        $script:facingLeft = ($cur.X -gt $cx)
+        $sulkLines = @('哼…都不理我…', '旺旺生氣了…（摸摸我）', '好無聊喔…都沒人陪我玩')
+        Set-Bubble ([string]$sulkLines[$script:rng.Next(0, $sulkLines.Count)])
+    }
+}
+
+# -----------------------------------------------------------------------------
+# 一天的時間: good morning (stretch), lunch time (comes over to remind you), home time on weekdays (comes over,
+# sits and wags). Times and the days already done are kept in %APPDATA%\DachshundPet\daily.txt.
+# -----------------------------------------------------------------------------
+function Import-DailySetting {
+    $script:offworkTime = '17:30'
+    $script:offworkOn = $true
+    $script:dayDone = @{ morning = ''; lunch = ''; off = '' }
+    try {
+        if ([string]::IsNullOrEmpty($script:dailyFile) -or -not (Test-Path -LiteralPath $script:dailyFile)) { return }
+        foreach ($ln in [System.IO.File]::ReadAllLines($script:dailyFile)) {
+            $i = $ln.IndexOf('=')
+            if ($i -le 0) { continue }
+            $k = $ln.Substring(0, $i)
+            $v = $ln.Substring($i + 1)
+            if ($k -eq 'offwork' -and $v -match '^\d{1,2}:\d{2}$') { $script:offworkTime = $v }
+            if ($k -eq 'offon') { $script:offworkOn = ($v -ne '0') }
+            if ($k -eq 'morning' -or $k -eq 'lunch' -or $k -eq 'off') { $script:dayDone[$k] = $v }
+        }
+    } catch { $null = Write-ErrorLog ('下班時間設定無法讀取：' + $_.ToString()) }
+}
+
+function Save-DailySetting {
+    try {
+        if ([string]::IsNullOrEmpty($script:dailyFile)) { return }
+        $dir = Split-Path -Parent $script:dailyFile
+        if (-not (Test-Path -LiteralPath $dir)) { [void](New-Item -ItemType Directory -Path $dir -Force) }
+        $on = '0'
+        if ($script:offworkOn) { $on = '1' }
+        $lines = @(('offwork=' + $script:offworkTime), ('offon=' + $on), ('morning=' + $script:dayDone['morning']), ('lunch=' + $script:dayDone['lunch']), ('off=' + $script:dayDone['off']))
+        [System.IO.File]::WriteAllLines($script:dailyFile, [string[]]$lines, [System.Text.UTF8Encoding]::new($false))
+    } catch { $null = Write-ErrorLog ('下班時間設定無法儲存：' + $_.ToString()) }
+}
+
+function Start-DogComeOver([string]$what) {
+    # Runs over to the mouse pointer and then says something (lunch / home time); straight away when it does not walk.
+    $script:begWhat = $what
+    if ($true) {
+        $script:begging = $true
+        $script:roamTarget = $null
+        $script:roamPauseTicks = 0
+    } else {
+        Invoke-DogBeg
+    }
+}
+
+function Update-DayEvents {
+    if (-not $script:dailyEnabled) { return }
+    if ($script:dogHidden -or $script:dogBehind -or $script:awaySeen -or $script:alarmRinging -or $script:focusState -eq 'focus') { return }
+    if ($script:dogSleeping -and $script:dogNightSleep) { return }
+    if ($script:dogAct -ne '' -or $script:actionMode -ne 'idle' -or $script:isDragging -or $script:begging) { return }
+    $now = Get-Date
+    $today = $now.ToString('yyyy-MM-dd')
+    if ($script:dogSleeping) { return }
+    if ($now.Hour -ge 6 -and $now.Hour -lt 11 -and $script:dayDone['morning'] -ne $today) {
+        $script:dayDone['morning'] = $today
+        Save-DailySetting
+        $hello = @('早安！今天也一起加油～汪！', '早安～旺旺伸個懶腰！', '早～安～今天也要開開心心的！')
+        if (Test-DogAction 'bow') { Start-DogAction 'bow' ([string]$hello[$script:rng.Next(0, $hello.Count)]) } else { Set-Bubble ([string]$hello[0]) }
+        return
+    }
+    if ($now.Hour -eq 12 -and $now.Minute -lt 30 -and $script:dayDone['lunch'] -ne $today) {
+        $script:dayDone['lunch'] = $today
+        Save-DailySetting
+        Start-DogComeOver 'lunch'
+        return
+    }
+    if ($script:offworkOn -and $now.DayOfWeek -ne [System.DayOfWeek]::Saturday -and $now.DayOfWeek -ne [System.DayOfWeek]::Sunday -and $script:dayDone['off'] -ne $today) {
+        $parts = $script:offworkTime -split ':'
+        $at = $now.Date.AddHours([int]$parts[0]).AddMinutes([int]$parts[1])
+        if ($now -ge $at -and $now -lt $at.AddMinutes(30)) {
+            $script:dayDone['off'] = $today
+            Save-DailySetting
+            Start-DogComeOver 'offwork'
+        }
+    }
+}
+
+function Show-OffworkDialog {
+    $f = New-Object System.Windows.Forms.Form
+    $f.Text = '旺旺下班提醒'
+    $f.FormBorderStyle = 'FixedDialog'
+    $f.MaximizeBox = $false
+    $f.MinimizeBox = $false
+    $f.StartPosition = 'CenterScreen'
+    $f.TopMost = $true
+    $f.ClientSize = [System.Drawing.Size]::new((Get-Scaled 300), (Get-Scaled 150))
+    $chk = New-Object System.Windows.Forms.CheckBox
+    $chk.Text = '週一到週五下班時間，旺旺跑過來提醒你'
+    $chk.Checked = [bool]$script:offworkOn
+    $chk.AutoSize = $true
+    $chk.Location = [System.Drawing.Point]::new((Get-Scaled 14), (Get-Scaled 14))
+    $lbl = New-Object System.Windows.Forms.Label
+    $lbl.Text = '下班時間：'
+    $lbl.AutoSize = $true
+    $lbl.Location = [System.Drawing.Point]::new((Get-Scaled 14), (Get-Scaled 54))
+    $tp = New-Object System.Windows.Forms.DateTimePicker
+    $tp.Format = [System.Windows.Forms.DateTimePickerFormat]::Custom
+    $tp.CustomFormat = 'HH:mm'
+    $tp.ShowUpDown = $true
+    $parts = $script:offworkTime -split ':'
+    $tp.Value = (Get-Date).Date.AddHours([int]$parts[0]).AddMinutes([int]$parts[1])
+    $tp.Width = Get-Scaled 80
+    $tp.Location = [System.Drawing.Point]::new((Get-Scaled 100), (Get-Scaled 50))
+    $ok = New-Object System.Windows.Forms.Button
+    $ok.Text = '確定'
+    $ok.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    $ok.Location = [System.Drawing.Point]::new((Get-Scaled 120), (Get-Scaled 104))
+    $cancel = New-Object System.Windows.Forms.Button
+    $cancel.Text = '取消'
+    $cancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $cancel.Location = [System.Drawing.Point]::new((Get-Scaled 205), (Get-Scaled 104))
+    $f.Controls.AddRange(@($chk, $lbl, $tp, $ok, $cancel))
+    $f.AcceptButton = $ok
+    $f.CancelButton = $cancel
+    try {
+        if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+            $script:offworkOn = [bool]$chk.Checked
+            $script:offworkTime = $tp.Value.ToString('HH:mm')
+            if ($tp.Value.TimeOfDay -gt (Get-Date).TimeOfDay) { $script:dayDone['off'] = '' }
+            Save-DailySetting
+            try { $script:miOffwork.Text = (Get-OffworkMenuText) } catch { }
+            if ($script:offworkOn) { Set-Bubble ('好～每天 ' + $script:offworkTime + ' 提醒你下班！') } else { Set-Bubble '好，下班不提醒了' }
+        }
+    } finally {
+        $f.Dispose()
+    }
+}
+
+function Get-OffworkMenuText {
+    if ($script:offworkOn) { return ('下班提醒：週一到週五 ' + $script:offworkTime + '（點這裡修改）…') }
+    return '下班提醒：關閉（點這裡設定）…'
+}
+
+# -----------------------------------------------------------------------------
+# 大便: now and then (more likely a while after eating) 旺旺 squats and leaves a little poop behind it.
+# Right-click → 清潔: the mouse pointer becomes a broom over the whole screen; click a poop to sweep it away
+# (right-click or Esc ends cleaning). After 10 minutes flies buzz around it. 旺旺 keeps away from its poop.
+# Each poop has its own small see-through window that never takes the keyboard focus and lets clicks through.
+# -----------------------------------------------------------------------------
+function Get-PoopImage {
+    if ($null -ne $script:poopSrc) { return $script:poopSrc }
+    $png = Join-Path $PSScriptRoot 'poop.png'
+    if (-not (Test-Path -LiteralPath $png)) { return $null }
+    $script:poopSrc = [System.Drawing.Image]::FromFile($png)
+    return $script:poopSrc
+}
+
+function Get-PoopFoot {
+    # Where 旺旺's feet are (screen point, middle of the picture's ground line).
+    return @(($script:baseLocation.X + $script:form.Width / 2.0), ($script:baseLocation.Y + $script:form.Height * 674.0 / 768.0))
+}
+
+function Get-PoopNear([double]$x, [double]$y, [double]$r) {
+    foreach ($p in $script:poops) {
+        $dx = [double]$p.X - $x
+        $dy = [double]$p.Y - $y
+        if (($dx * $dx + $dy * $dy) -le ($r * $r)) { return $p }
+    }
+    return $null
+}
+
+function Add-DogPoop {
+    $src = Get-PoopImage
+    if ($null -eq $src) { return }
+    $w = [double]$script:form.Width
+    $pw = [Math]::Max(14, [int][Math]::Round($w * 0.16))
+    $ph = [Math]::Max(12, [int][Math]::Round($pw * $src.Height / [double]$src.Width))
+    # Just behind the rump (the squatting picture's rump ends at about 210 of the 768 pixels).
+    $rear = $script:baseLocation.X + $w * 0.27 - $pw / 2.0
+    if ($script:facingLeft) { $rear = $script:baseLocation.X + $w - ($w * 0.27) + $pw / 2.0 }
+    $ground = $script:baseLocation.Y + $script:form.Height * 674.0 / 768.0
+    $f = $null
+    if ($script:glassAvailable) { try { $f = New-Object WangwangFx.GlassForm } catch { $f = $null } }
+    if ($null -eq $f) { $f = New-Object System.Windows.Forms.Form }
+    $f.Text = '旺旺的大便'
+    $f.FormBorderStyle = 'None'
+    $f.StartPosition = 'Manual'
+    $f.ShowInTaskbar = $false
+    $f.TopMost = $script:topMostWanted
+    $f.BackColor = [System.Drawing.Color]::Magenta
+    $f.TransparencyKey = [System.Drawing.Color]::Magenta
+    $f.BackgroundImageLayout = [System.Windows.Forms.ImageLayout]::None
+    $fw = $pw * 3
+    $fh = [int][Math]::Round($ph * 2.8)
+    $f.Size = [System.Drawing.Size]::new($fw, $fh)
+    $f.Location = [System.Drawing.Point]::new(-25000, -25000)
+    $p = @{ X = $rear; Y = $ground; PW = $pw; PH = $ph; FW = $fw; FH = $fh; Born = (Get-Date); Form = $f; Sweep = 0; Phase = $script:rng.NextDouble() * 6.28; Flies = $false; Shown = $false }
+    [void]$script:poops.Add($p)
+    Show-PoopFrame $p
+    # 旺旺 stays in front of its poop.
+    $script:form.TopMost = -not $script:topMostWanted
+    $script:form.TopMost = $true
+    $script:form.TopMost = $script:topMostWanted
+}
+
+function Show-PoopFrame($p) {
+    $fw = [int]$p.FW
+    $fh = [int]$p.FH
+    $pw = [int]$p.PW
+    $ph = [int]$p.PH
+    $bmp = [System.Drawing.Bitmap]::new($fw, $fh, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    try {
+        $g = [System.Drawing.Graphics]::FromImage($bmp)
+        try {
+            $g.Clear([System.Drawing.Color]::Transparent)
+            $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+            $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+            $t = [double]$script:clockTick
+            $k = 1.0
+            if ([int]$p.Sweep -gt 0) { $k = [Math]::Max(0.0, 1.0 - [int]$p.Sweep / 7.0) }
+            $dw = $pw * $k
+            $dh = $ph * $k
+            $src = Get-PoopImage
+            if ($null -ne $src -and $k -gt 0.02) {
+                $g.DrawImage($src, [System.Drawing.RectangleF]::new([float](($fw - $dw) / 2.0), [float]($fh - 1 - $dh), [float]$dw, [float]$dh))
+            }
+            $cx = $fw / 2.0
+            $topY = $fh - $ph
+            if ([bool]$p.Flies -and [int]$p.Sweep -eq 0) {
+                # Smell lines rising, and three flies buzzing round.
+                $lw = [float][Math]::Max(1.5, $pw / 22.0)
+                $pen = [System.Drawing.Pen]::new([System.Drawing.Color]::FromArgb(255, 120, 150, 60), $lw)
+                try {
+                    for ($i = -1; $i -le 1; $i++) {
+                        $pts = New-Object 'System.Drawing.PointF[]' 7
+                        $baseX = $cx + $i * $pw * 0.28
+                        for ($q = 0; $q -lt 7; $q++) {
+                            $yy = $topY - $ph * 0.1 - $q * $ph * 0.12 - (($t * 0.6 + $i * 7) % 6) * $ph * 0.02
+                            $xx = $baseX + [Math]::Sin($q * 1.2 + $t * 0.35 + $i) * $pw * 0.07
+                            $pts[$q] = [System.Drawing.PointF]::new([float]$xx, [float]$yy)
+                        }
+                        $g.DrawCurve($pen, $pts)
+                    }
+                } finally { $pen.Dispose() }
+                $body = [System.Drawing.SolidBrush]::new([System.Drawing.Color]::FromArgb(255, 30, 30, 36))
+                $wing = [System.Drawing.SolidBrush]::new([System.Drawing.Color]::FromArgb(255, 200, 225, 240))
+                $edge = [System.Drawing.Pen]::new([System.Drawing.Color]::FromArgb(255, 90, 110, 130), [float]1)
+                try {
+                    $fs = [Math]::Max(3.0, $pw / 7.0)
+                    for ($j = 0; $j -lt 3; $j++) {
+                        $ph0 = [double]$p.Phase + $j * 2.1
+                        $fx = $cx + [Math]::Sin($t * (0.16 + $j * 0.03) + $ph0) * $fw * 0.36
+                        $fy = $topY - $ph * 0.55 + [Math]::Sin($t * (0.23 + $j * 0.04) + $ph0 * 1.7) * $ph * 0.55
+                        $flap = (($script:clockTick + $j) % 2) -eq 0
+                        $wh = $fs * 0.9
+                        if ($flap) { $wh = $fs * 0.45 }
+                        $g.FillEllipse($wing, [float]($fx - $fs * 0.9), [float]($fy - $wh - $fs * 0.2), [float]($fs * 0.9), [float]$wh)
+                        $g.FillEllipse($wing, [float]($fx + $fs * 0.05), [float]($fy - $wh - $fs * 0.2), [float]($fs * 0.9), [float]$wh)
+                        $g.DrawEllipse($edge, [float]($fx - $fs * 0.9), [float]($fy - $wh - $fs * 0.2), [float]($fs * 0.9), [float]$wh)
+                        $g.DrawEllipse($edge, [float]($fx + $fs * 0.05), [float]($fy - $wh - $fs * 0.2), [float]($fs * 0.9), [float]$wh)
+                        $g.FillEllipse($body, [float]($fx - $fs * 0.55), [float]($fy - $fs * 0.4), [float]($fs * 1.1), [float]($fs * 0.8))
+                    }
+                } finally {
+                    $body.Dispose()
+                    $wing.Dispose()
+                    $edge.Dispose()
+                }
+            }
+            if ([int]$p.Sweep -gt 0) {
+                # Sparkles where it was swept away.
+                $star = [System.Drawing.SolidBrush]::new([System.Drawing.Color]::FromArgb(255, 255, 214, 60))
+                try {
+                    for ($j = 0; $j -lt 5; $j++) {
+                        $a = $j * 1.256 + [int]$p.Sweep * 0.4
+                        $r = $pw * (0.25 + [int]$p.Sweep * 0.06)
+                        $sx = $cx + [Math]::Cos($a) * $r
+                        $sy = $fh - $ph * 0.6 + [Math]::Sin($a) * $r * 0.6
+                        $ss = [Math]::Max(2.0, $pw / 10.0)
+                        $g.FillPolygon($star, [System.Drawing.PointF[]]@(
+                            [System.Drawing.PointF]::new([float]$sx, [float]($sy - $ss)), [System.Drawing.PointF]::new([float]($sx + $ss * 0.3), [float]($sy - $ss * 0.3)),
+                            [System.Drawing.PointF]::new([float]($sx + $ss), [float]$sy), [System.Drawing.PointF]::new([float]($sx + $ss * 0.3), [float]($sy + $ss * 0.3)),
+                            [System.Drawing.PointF]::new([float]$sx, [float]($sy + $ss)), [System.Drawing.PointF]::new([float]($sx - $ss * 0.3), [float]($sy + $ss * 0.3)),
+                            [System.Drawing.PointF]::new([float]($sx - $ss), [float]$sy), [System.Drawing.PointF]::new([float]($sx - $ss * 0.3), [float]($sy - $ss * 0.3))))
+                    }
+                } finally { $star.Dispose() }
+            }
+        } finally {
+            $g.Dispose()
+        }
+        $keyed = [System.Drawing.Bitmap]::new($fw, $fh, [System.Drawing.Imaging.PixelFormat]::Format24bppRgb)
+        $kg = [System.Drawing.Graphics]::FromImage($keyed)
+        try {
+            $kg.Clear([System.Drawing.Color]::Magenta)
+            $cut = Convert-AlphaCut $bmp
+            try { $kg.DrawImageUnscaled($cut, 0, 0) } finally { $cut.Dispose() }
+        } finally {
+            $kg.Dispose()
+        }
+    } finally {
+        $bmp.Dispose()
+    }
+    $f = $p.Form
+    $old = $f.BackgroundImage
+    $f.BackgroundImage = $keyed
+    if ($null -ne $old) { $old.Dispose() }
+    $loc = [System.Drawing.Point]::new([int][Math]::Round([double]$p.X - $p.FW / 2.0), [int][Math]::Round([double]$p.Y - $p.FH + 1))
+    if ($script:dogHidden -or $script:dogBehind) { $loc = [System.Drawing.Point]::new(-25000, -25000) }
+    if ($f.Location -ne $loc) { $f.Location = $loc }
+    if (-not [bool]$p.Shown) {
+        $f.Show()
+        $p.Shown = $true
+    }
+    $f.Refresh()
+}
+
+function Remove-DogPoop($p) {
+    [void]$script:poops.Remove($p)
+    try {
+        $f = $p.Form
+        $f.Hide()
+        $old = $f.BackgroundImage
+        $f.BackgroundImage = $null
+        if ($null -ne $old) { $old.Dispose() }
+        $f.Close()
+        $f.Dispose()
+    } catch { }
+}
+
+function Update-Poops {
+    # Every tick: flies after 10 minutes, the sweeping animation, hidden while 旺旺 hides.
+    if ($script:poops.Count -eq 0) { return }
+    $now = Get-Date
+    $hide = ($script:dogHidden -or $script:dogBehind)
+    foreach ($p in @($script:poops)) {
+        if ([int]$p.Sweep -gt 0) {
+            $p.Sweep = [int]$p.Sweep + 1
+            if ([int]$p.Sweep -gt 8) {
+                Remove-DogPoop $p
+                if ($script:poops.Count -eq 0) {
+                    Stop-CleanMode
+                    Add-DogMood 2
+                    $done = @('掃乾淨了！謝謝～♥', '好乾淨！旺旺最喜歡你了～♥', '香香的了～謝謝你幫我清！')
+                    Set-Bubble ([string]$done[$script:rng.Next(0, $done.Count)])
+                    if (-not $script:dogSleeping -and $script:dogAct -eq '') { $script:actionMode = 'happy'; $script:actionTick = 0 }
+                }
+                continue
+            }
+            Show-PoopFrame $p
+            continue
+        }
+        $flies = (($now - [datetime]$p.Born).TotalMinutes -ge 10)
+        $wasHidden = ($p.Form.Location.X -le -20000)
+        if ($flies -ne [bool]$p.Flies -or ($flies -and -not $hide -and ($script:clockTick % 2) -eq 0) -or ($hide -ne $wasHidden)) {
+            $p.Flies = $flies
+            Show-PoopFrame $p
+        }
+    }
+}
+
+function Update-DogPoop {
+    # Every 3 seconds: time for a poop? And 旺旺 walks away when it is standing next to one.
+    $now = Get-Date
+    if ($script:poops.Count -gt 0 -and -not $script:dogSleeping -and $script:dogAct -eq '' -and -not $script:isDragging -and -not $script:begging -and
+        $script:clockTick -ge $script:avoidUntil -and $script:clockTick -ge $script:summonRunUntil -and $script:clockTick -ge $script:bedWalkUntil) {
+        $foot = Get-PoopFoot
+        $r = $script:form.Width * 0.8
+        $near = Get-PoopNear $foot[0] $foot[1] $r
+        if ($null -ne $near) { Move-AwayFromPoop $near ($script:rng.Next(0, 3) -eq 0) }
+    }
+    if (-not $script:poopEnabled -or $now -lt $script:poopNextAt) { return }
+    if ($script:dogSleeping -or $script:dogHidden -or $script:dogBehind -or $script:awaySeen -or $script:alarmRinging -or $script:focusState -eq 'focus') { return }
+    if ($script:dogAct -ne '' -or $script:actionMode -ne 'idle' -or $script:isDragging -or $script:begging) { return }
+    if (-not (Test-DogAction 'poop') -or $null -eq (Get-PoopImage)) { $script:poopNextAt = $now.AddMinutes(60); return }
+    if ($script:poops.Count -ge 3) {
+        $script:poopNextAt = $now.AddMinutes(15)
+        Set-Bubble '憋不住了…快幫我清一清啦！（右鍵 → 清潔）'
+        return
+    }
+    $script:poopNextAt = $now.AddMinutes($script:rng.Next(60, 151))
+    Start-DogAction 'poop' ''
+}
+
+function Move-AwayFromPoop($p, [bool]$say) {
+    $foot = Get-PoopFoot
+    $dx = $foot[0] - [double]$p.X
+    $dy = $foot[1] - [double]$p.Y
+    $d = [Math]::Sqrt($dx * $dx + $dy * $dy)
+    if ($d -lt 1) { $dx = 1; $dy = 0; $d = 1 }
+    $go = $script:form.Width * 1.3
+    $b = Get-RoamBounds
+    if ($script:gravityMode) { $gb = Get-GroundBounds; $b = @($gb[0], $gb[1], $gb[3], $gb[3]) }
+    $tx = [double]$p.X + $dx / $d * $go - $script:form.Width / 2.0
+    $ty = [double]$p.Y + $dy / $d * $go - $script:form.Height * 674.0 / 768.0
+    if ($tx -lt $b[0] -or $tx -gt $b[1]) { $tx = [double]$p.X - $dx / $d * $go - $script:form.Width / 2.0 }
+    $tx = [Math]::Min([Math]::Max($tx, [double]$b[0]), [double]$b[1])
+    $ty = [Math]::Min([Math]::Max($ty, [double]$b[2]), [double]$b[3])
+    $script:roamTarget = [System.Drawing.Point]::new([int]$tx, [int]$ty)
+    $script:roamPauseTicks = 0
+    $script:avoidUntil = $script:clockTick + 250
+    if ($say) {
+        $stink = @('好臭～走開走開！', '噁…旺旺不要待在這裡', '臭臭的～快來清一下啦')
+        Set-Bubble ([string]$stink[$script:rng.Next(0, $stink.Count)])
+    }
+}
+
+function Get-BroomCursor {
+    if ($null -ne $script:broomCursor) { return $script:broomCursor }
+    $script:broomCursor = [System.Windows.Forms.Cursors]::Hand
+    $png = Join-Path $PSScriptRoot 'broom.png'
+    if (-not (Test-Path -LiteralPath $png)) { return $script:broomCursor }
+    $src = $null
+    $bmp = $null
+    try {
+        $src = [System.Drawing.Image]::FromFile($png)
+        $side = Get-Scaled 64
+        $bmp = [System.Drawing.Bitmap]::new($side, $side, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+        $g = [System.Drawing.Graphics]::FromImage($bmp)
+        try {
+            $g.Clear([System.Drawing.Color]::Transparent)
+            $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+            # The pointer's hot spot is the middle of the picture: the broom's bristles end there.
+            $bs = [int]($side * 0.56)
+            $g.DrawImage($src, [System.Drawing.Rectangle]::new(([int]($side / 2) - $bs + [int]($bs * 0.1)), ([int]($side / 2) - $bs + [int]($bs * 0.1)), $bs, $bs))
+        } finally {
+            $g.Dispose()
+        }
+        $script:broomCursor = [System.Windows.Forms.Cursor]::new($bmp.GetHicon())
+    } catch {
+        $script:broomCursor = [System.Windows.Forms.Cursors]::Hand
+        $null = Write-ErrorLog ('掃把游標無法使用：' + $_.ToString())
+    } finally {
+        if ($null -ne $bmp) { $bmp.Dispose() }
+        if ($null -ne $src) { $src.Dispose() }
+    }
+    return $script:broomCursor
+}
+
+function Start-CleanMode {
+    if ($script:poops.Count -eq 0) { Set-Bubble '很乾淨，沒有大便要掃喔～'; return }
+    if ($null -ne $script:cleanForm) { return }
+    $vs = [System.Windows.Forms.SystemInformation]::VirtualScreen
+    $cf = New-Object System.Windows.Forms.Form
+    $cf.Text = '旺旺清潔中'
+    $cf.FormBorderStyle = 'None'
+    $cf.StartPosition = 'Manual'
+    $cf.ShowInTaskbar = $false
+    $cf.TopMost = $true
+    $cf.KeyPreview = $true
+    $cf.BackColor = [System.Drawing.Color]::Black
+    $cf.Opacity = 0.01
+    $cf.Bounds = $vs
+    $cf.Cursor = Get-BroomCursor
+    $cf.Add_MouseDown({
+        param($sender, $e)
+        try {
+            if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Right) { Stop-CleanMode; Set-Bubble '好，先不掃了～'; return }
+            if ($e.Button -ne [System.Windows.Forms.MouseButtons]::Left) { return }
+            $script:cleanIdleTick = $script:clockTick
+            $pt = [System.Windows.Forms.Cursor]::Position
+            $hit = $null
+            foreach ($p in $script:poops) {
+                if ([int]$p.Sweep -gt 0) { continue }
+                $pad = [double]$p.PW * 0.35
+                if ($pt.X -ge ([double]$p.X - $p.PW / 2.0 - $pad) -and $pt.X -le ([double]$p.X + $p.PW / 2.0 + $pad) -and
+                    $pt.Y -ge ([double]$p.Y - $p.PH - $pad) -and $pt.Y -le ([double]$p.Y + $pad)) { $hit = $p; break }
+            }
+            if ($null -ne $hit) {
+                $hit.Sweep = 1
+                Show-PoopFrame $hit
+            } elseif ($script:rng.Next(0, 2) -eq 0) {
+                Set-Bubble '掃錯地方了～要點大便喔！'
+            }
+        } catch { $null = Write-ErrorLog ('清潔錯誤：' + $_.ToString()) }
+    })
+    $cf.Add_KeyDown({
+        param($sender, $e)
+        if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Escape) { Stop-CleanMode; Set-Bubble '好，先不掃了～' }
+    })
+    $script:cleanForm = $cf
+    $script:cleanIdleTick = $script:clockTick
+    $cf.Show()
+    $cf.Activate()
+    Set-Bubble '拿起掃把了！點大便把它掃乾淨～（右鍵或 Esc 結束）'
+}
+
+function Stop-CleanMode {
+    if ($null -eq $script:cleanForm) { return }
+    $cf = $script:cleanForm
+    $script:cleanForm = $null
+    try { $cf.Close(); $cf.Dispose() } catch { }
+}
+
 function Import-DogPictures {
     $main = Get-OutfitPicture 'dachshund_3d_00.png'
     if ($null -eq $main) { throw ('找不到臘腸狗圖片：' + (Join-Path $PSScriptRoot 'dachshund_3d_00.png')) }
@@ -1184,6 +1790,10 @@ function Import-DogPictures {
         $pp = Get-OutfitPicture ('dachshund_3d_' + $pn + '.png')
         if ($null -ne $pp) { $script:dogPoses[$pn] = $pp }
     }
+    # Squatting for a poop (poop_00): the outfit's own picture, or the plain one without clothes; otherwise it sits.
+    $poopPic = $null
+    if ([string]::IsNullOrEmpty($script:outfitDir)) { $poopPic = Join-Path $PSScriptRoot 'dachshund_3d_poop_00.png' } else { $poopPic = Join-Path $script:outfitDir 'dachshund_3d_poop_00.png' }
+    if (Test-Path -LiteralPath $poopPic) { $script:dogPoses['poop_00'] = $poopPic } elseif ($script:dogPoses.ContainsKey('sit_00')) { $script:dogPoses['poop_00'] = $script:dogPoses['sit_00'] }
     # Eating the thrown jerky lying down (jeat_*): only when this outfit has its own pictures (or no clothes),
     # never the plain pictures under an outfit. Without them 旺旺 eats the jerky the short way (jerky_00/01).
     $script:jeatReady = $true
@@ -1396,6 +2006,22 @@ function Step-Roam {
         } else {
             $tx = $script:rng.Next([int]$b[0], [int]$b[1] + 1)
             $ty = $script:rng.Next([int]$b[2], [int]$b[3] + 1)
+            if ($script:affection -ge 80 -and $script:rng.Next(0, 100) -lt 35) {
+                # Very happy: likes to stay near you (somewhere close to the mouse pointer).
+                $cur = [System.Windows.Forms.Cursor]::Position
+                $tx = [int]($cur.X - $script:form.Width / 2 + $script:rng.Next(-1, 2) * $script:form.Width * 0.8)
+                $ty = [int]($cur.Y - $script:form.Height * 0.7 + $script:rng.Next(-40, 41))
+                $tx = [Math]::Min([Math]::Max($tx, [int]$b[0]), [int]$b[1])
+                $ty = [Math]::Min([Math]::Max($ty, [int]$b[2]), [int]$b[3])
+            }
+            # Never to a spot next to its poop.
+            for ($try = 0; $try -lt 12 -and $script:poops.Count -gt 0; $try++) {
+                $fx = $tx + $script:form.Width / 2.0
+                $fy = $ty + $script:form.Height * 674.0 / 768.0
+                if ($null -eq (Get-PoopNear $fx $fy ($script:form.Width * 0.9))) { break }
+                $tx = $script:rng.Next([int]$b[0], [int]$b[1] + 1)
+                $ty = $script:rng.Next([int]$b[2], [int]$b[3] + 1)
+            }
         }
         $script:roamTarget = [System.Drawing.Point]::new($tx, $ty)
     }
@@ -3843,6 +4469,19 @@ function Update-DogHunger {
 
 function Invoke-DogBeg {
     $script:begging = $false
+    if ($script:begWhat -eq 'lunch') {
+        $lunch = @('午餐時間到了！記得去吃飯喔～', '中午了～吃飯飯！（旺旺也想吃…）', '12 點了！先去吃午餐再忙吧～')
+        if (Test-DogAction 'tilt') { Start-DogAction 'tilt' '' }
+        Set-Bubble ([string]$lunch[$script:rng.Next(0, $lunch.Count)])
+        $script:bubbleTicks = 120
+        return
+    }
+    if ($script:begWhat -eq 'offwork') {
+        $off = @('下班時間到了！收東西回家囉～汪！', '下班囉～今天辛苦了！♥', '時間到了！我們回家吧～')
+        if (Test-DogAction 'offwork') { Start-DogAction 'offwork' ([string]$off[$script:rng.Next(0, $off.Count)]) } else { Set-Bubble ([string]$off[0]) }
+        $script:bubbleTicks = 140
+        return
+    }
     $lines = @('好渴喔…可以給我水嗎？', '旺旺想喝水～（右鍵 → 餵水）')
     if ($script:begWhat -eq 'eat') { $lines = @('肚子好餓…可以給我點心嗎？', '旺旺想吃點心～（右鍵 → 餵點心）') }
     if (Test-DogAction 'tilt') { Start-DogAction 'tilt' '' }
@@ -3872,6 +4511,19 @@ function Set-PlaySetting([string]$name, [bool]$on) {
             $script:hungerEnabled = $on
             $script:begging = $false
             if ($on) { Set-Bubble '肚子餓會跟你說喔～' } else { Set-Bubble '好，不吵著要吃的了' }
+        }
+        'poop' {
+            $script:poopEnabled = $on
+            if ($on) { $script:poopNextAt = (Get-Date).AddMinutes($script:rng.Next(30, 91)); Set-Bubble '旺旺偶爾會大便，記得幫我清喔～' } else { Set-Bubble '好，旺旺會忍住不亂大便！' }
+        }
+        'sounds' {
+            $script:dogSounds = $on
+            if (-not $on -and $script:loopKey -eq 'snore') { Stop-SirenLoop }
+            if ($on) { Set-Bubble '旺旺吃東西、喝水、打呼會有小小的聲音～' } else { Set-Bubble '好，旺旺安安靜靜的' }
+        }
+        'daily' {
+            $script:dailyEnabled = $on
+            if ($on) { Set-Bubble '早上、中午、下班時間我會來找你！' } else { Set-Bubble '好，不管時間了' }
         }
         'siren' {
             $script:sirenEnabled = $on
@@ -3928,6 +4580,9 @@ $script:dogActionSpec = @{
     playdead = @{ Len = 110; Poses = @('lie_00', 'belly_00'); Say = @('翻肚肚～', '看我的肚子～', '旺旺翻肚了～') }
     jerky = @{ Len = 84;  Poses = @('jerky_00', 'jerky_01');  Say = @('肉乾！我的！', '咬到了～', '好香的肉乾！') }
     fetch = @{ Len = 0;   Poses = @();                        Say = @('肉乾！我來了～') }
+    poop  = @{ Len = 84;  Poses = @('sniff_00', 'sniff_01', 'poop_00'); Say = @('') }
+    sulk  = @{ Len = 400; Poses = @('lie_00');                Say = @('哼…') }
+    offwork = @{ Len = 150; Poses = @('sit_00');              Say = @('下班時間到了！收東西回家囉～汪！') }
 }
 
 function Test-DogAction([string]$name) {
@@ -3942,6 +4597,16 @@ function Start-DogAction([string]$name, [string]$say) {
     # $say: '' = no bubble, '*' = a random line for this action, anything else = that text.
     if (-not (Test-DogAction $name)) { Set-Bubble '少了這個動作的圖片'; return }
     $spec = $script:dogActionSpec[$name]
+    # 心情: attention makes 旺旺 happier; a sulking 旺旺 forgives you.
+    $moodGain = @{ pet = 2; headpat = 2; eat = 4; drink = 2; jerky = 5; paw = 2; spin = 1; playdead = 1; sit = 1 }
+    if ($moodGain.ContainsKey($name)) {
+        $wasSulking = ($script:dogAct -eq 'sulk')
+        Add-DogMood ([int]$moodGain[$name])
+        if ($wasSulking) { $say = '好啦～原諒你了！♥' }
+    }
+    if (($name -eq 'eat' -or $name -eq 'jerky') -and $script:poopNextAt -gt (Get-Date).AddMinutes(50)) {
+        $script:poopNextAt = (Get-Date).AddMinutes($script:rng.Next(30, 51))
+    }
     $script:dogSleeping = $false
     $script:bellyRubTicks = 0
     $script:trickPoked = $false
@@ -4349,6 +5014,7 @@ function Start-BellyRub {
     $first = ($script:bellyRubTicks -le 0)
     $script:bellyRubTicks = 46
     $script:lastInteractTick = $script:clockTick
+    if ($first) { Add-DogMood 2 }
     if ($first) {
         $lines = @('嘿嘿～好癢喔～', '好舒服～再摸摸～♥', '肚肚被摸了～開心！', '摸摸肚～旺旺最喜歡了～♥')
         Set-Bubble ([string]$lines[$script:rng.Next(0, $lines.Count)])
@@ -4457,6 +5123,20 @@ function Get-DogFramePath {
             return $null
         }
         'sit' {
+            return $script:dogPoses['sit_00']
+        }
+        'poop' {
+            # Sniffs out a good spot, squats, then a happy wag.
+            if ($t -lt 16) { if ((([int][Math]::Floor($t / 4)) % 2) -eq 0) { return $script:dogPoses['sniff_00'] } else { return $script:dogPoses['sniff_01'] } }
+            if ($t -lt 62) { return $script:dogPoses['poop_00'] }
+            $poopWag = @(0, 1, 2, 1)
+            if ($script:dogHappyFrames.Count -eq 3) { return $script:dogHappyFrames[$poopWag[$t % 4]] }
+            return $null
+        }
+        'sulk' {
+            return $script:dogPoses['lie_00']
+        }
+        'offwork' {
             return $script:dogPoses['sit_00']
         }
         'eat' {
@@ -4808,6 +5488,31 @@ try {
     $script:updMode = ''
     $script:updManual = $false
     Import-UpdSetting
+    # 旺旺的小聲音, 心情, 早安／午餐／下班, 大便.
+    $script:dogSounds = $true
+    $script:dogSoundPlayers = @{}
+    $script:loopKey = ''
+    $script:chewSoundTick = -100
+    $script:moodFile = ''
+    $script:dailyFile = ''
+    if (-not [string]::IsNullOrEmpty($script:alarmFile)) {
+        $script:moodFile = Join-Path (Split-Path -Parent $script:alarmFile) 'mood.txt'
+        $script:dailyFile = Join-Path (Split-Path -Parent $script:alarmFile) 'daily.txt'
+    }
+    Import-DogMood
+    $script:moodDecayAt = (Get-Date).AddMinutes(15)
+    $script:sulkNextAt = (Get-Date).AddMinutes(20)
+    $script:dailyEnabled = $true
+    Import-DailySetting
+    $script:poops = New-Object System.Collections.ArrayList
+    $script:poopEnabled = $true
+    $script:poopSrc = $null
+    $script:poopNextAt = (Get-Date).AddMinutes($script:rng.Next(60, 151))
+    $script:poopToldClean = $false
+    $script:avoidUntil = 0
+    $script:broomCursor = $null
+    $script:cleanForm = $null
+    $script:cleanIdleTick = 0
     $script:dotForm = $null
     $script:dotTip = $null
     $script:dotBitmap = $null
@@ -4974,10 +5679,13 @@ try {
     # ----- Right-click menu -----
     $cms = New-Object System.Windows.Forms.ContextMenuStrip
     $script:cms = $cms
-    $cms.Add_Opening({ $script:lastInteractTick = $script:clockTick })
+    $cms.Add_Opening({
+        $script:lastInteractTick = $script:clockTick
+        try { $script:miMood.Text = Get-DogMoodText } catch { }
+    })
 
     $miActions = New-Object System.Windows.Forms.ToolStripMenuItem('叫旺旺做動作')
-    foreach ($da in @(@('歪頭', 'tilt'), @('聞聞', 'sniff'), @('甩甩頭', 'shake'), @('東張西望', 'look'), @('伸懶腰', 'bow'), @('趴一下', 'lie'), @('坐下', 'sit'), @('打哈欠', 'yawn'))) {
+    foreach ($da in @(@('歪頭', 'tilt'), @('聞聞', 'sniff'), @('甩甩頭', 'shake'), @('東張西望', 'look'), @('伸懶腰', 'bow'), @('趴一下', 'lie'), @('坐下', 'sit'), @('打哈欠', 'yawn'), @('上廁所（大便）', 'poop'))) {
         $daItem = New-Object System.Windows.Forms.ToolStripMenuItem([string]$da[0])
         $daItem.Tag = [string]$da[1]
         $daItem.Add_Click({
@@ -5018,6 +5726,9 @@ try {
         try { Start-JerkyThrow } catch { $null = Write-ErrorLog ('丟肉乾錯誤：' + $_.ToString()); try { Hide-Jerky } catch { } }
     })
     [void]$cms.Items.Add($miJerky)
+    $miClean = New-Object System.Windows.Forms.ToolStripMenuItem('清潔（拿掃把掃大便）')
+    $miClean.Add_Click({ try { Start-CleanMode } catch { $null = Write-ErrorLog ('清潔錯誤：' + $_.ToString()); Set-Bubble '掃把拿不起來…再試一次～'; try { Stop-CleanMode } catch { } } })
+    [void]$cms.Items.Add($miClean)
     $miWater = New-Object System.Windows.Forms.ToolStripMenuItem('餵水')
     $miWater.Add_Click({
         try {
@@ -5406,7 +6117,7 @@ try {
     })
     [void]$cms.Items.Add($miNight)
     $miPlay = New-Object System.Windows.Forms.ToolStripMenuItem('互動設定')
-    foreach ($playInfo in @(@('離開電腦時等你、回來時迎接你', 'away'), @('滑鼠在牠面前左右晃會撲過來', 'tease'), @('滑鼠一直繞圈圈會跑過來追', 'circle'), @('肚子餓、口渴會來討吃的', 'hunger'), @('節日自動換衣服', 'holiday'), @('從右下角叫旺旺時，被視窗擋住會打破螢幕衝出來', 'glass'), @('滑鼠停在頭上會瞇眼享受摸頭', 'headpat'), @('穿警察巡邏車汪汪跑起來時發出鳴笛聲（警示燈一樣會閃）', 'siren'))) {
+    foreach ($playInfo in @(@('離開電腦時等你、回來時迎接你', 'away'), @('滑鼠在牠面前左右晃會撲過來', 'tease'), @('滑鼠一直繞圈圈會跑過來追', 'circle'), @('肚子餓、口渴會來討吃的', 'hunger'), @('節日自動換衣服', 'holiday'), @('從右下角叫旺旺時，被視窗擋住會打破螢幕衝出來', 'glass'), @('滑鼠停在頭上會瞇眼享受摸頭', 'headpat'), @('穿警察巡邏車汪汪跑起來時發出鳴笛聲（警示燈一樣會閃）', 'siren'), @('旺旺會隨地大便（右鍵「清潔」掃乾淨）', 'poop'), @('旺旺的小聲音（嚼嚼、舔水、打呼）', 'sounds'), @('早安、午餐、下班時間會來找你', 'daily'))) {
         $playItem = New-Object System.Windows.Forms.ToolStripMenuItem([string]$playInfo[0])
         $playItem.Tag = [string]$playInfo[1]
         $playItem.CheckOnClick = $true
@@ -5430,7 +6141,13 @@ try {
     $miBirthday = New-Object System.Windows.Forms.ToolStripMenuItem('設定生日（當天穿生日派對裝）…')
     $miBirthday.Add_Click({ try { Show-BirthdayDialog } catch { $null = Write-ErrorLog ('生日設定錯誤：' + $_.ToString()) } })
     [void]$miPlay.DropDownItems.Add($miBirthday)
+    $script:miOffwork = New-Object System.Windows.Forms.ToolStripMenuItem((Get-OffworkMenuText))
+    $script:miOffwork.Add_Click({ try { Show-OffworkDialog } catch { $null = Write-ErrorLog ('下班時間設定錯誤：' + $_.ToString()) } })
+    [void]$miPlay.DropDownItems.Add($script:miOffwork)
     [void]$cms.Items.Add($miPlay)
+    $script:miMood = New-Object System.Windows.Forms.ToolStripMenuItem((Get-DogMoodText))
+    $script:miMood.Add_Click({ try { $script:lastInteractTick = $script:clockTick; Set-Bubble ('今天的心情：' + ((Get-DogMoodText) -replace '^旺旺的心情：', '') + '　多摸摸我、餵我會更開心喔！') } catch { } })
+    [void]$cms.Items.Add($script:miMood)
     [void]$cms.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
 
     $miTopMost = New-Object System.Windows.Forms.ToolStripMenuItem('永遠顯示在最上層')
@@ -5555,7 +6272,9 @@ try {
                 '‧鬧鐘：可以設好幾組（只響一次或每天），時間到旺旺會用真的叫聲汪汪叫，點牠一下就停' + $nl +
                 '‧自動汪汪叫會發出旺旺真的叫聲（右鍵可以關掉聲音）' + $nl +
                 '‧開會或分享螢幕時：右鍵「先躲起來」，點右下角的旺旺圖示叫牠回來' + $nl +
-                '‧晚上 10 點～早上 7 點會回狗窩睡覺' + $nl + $nl +
+                '‧晚上 10 點～早上 7 點會回狗窩睡覺' + $nl +
+                '‧旺旺偶爾會大便：右鍵「清潔」拿掃把掃乾淨，太久沒清會有蒼蠅飛來' + $nl +
+                '‧早安、午餐、下班時間會來找你；常摸摸牠、餵牠，心情會更好' + $nl + $nl +
                 '不安裝任何東西、不改 Windows 設定；只有「檢查更新」時會連到 GitHub 下載旺旺自己的檔案。' + $nl +
                 '完整說明請看資料夾裡的「使用說明.txt」。'
             [void][System.Windows.Forms.MessageBox]::Show([System.Windows.Forms.IWin32Window]$script:form, $about, '關於旺旺',
@@ -5817,6 +6536,10 @@ try {
                 try { Update-FocusTimer } catch { $null = Write-ErrorLog ('番茄鐘錯誤：' + $_.ToString()) }
                 try { if ($script:healthMinutes -gt 0 -and (Get-Date) -ge $script:healthNext) { Invoke-HealthReminder } } catch { $null = Write-ErrorLog ('健康提醒錯誤：' + $_.ToString()) }
                 try { if ($script:hungerEnabled) { Update-DogHunger } } catch { $null = Write-ErrorLog ('肚子餓錯誤：' + $_.ToString()) }
+                try { Update-DogPoop } catch { $null = Write-ErrorLog ('大便錯誤：' + $_.ToString()) }
+                try { Update-DogMood } catch { $null = Write-ErrorLog ('心情錯誤：' + $_.ToString()) }
+                try { Update-DayEvents } catch { $null = Write-ErrorLog ('早安／午餐／下班錯誤：' + $_.ToString()) }
+                if ($null -ne $script:cleanForm -and ($script:clockTick - $script:cleanIdleTick) -gt 750) { Stop-CleanMode; Set-Bubble '掃把先收起來囉～' }
             }
             # 1b) Away and back (only the time since the last key press or mouse move is read, never what was typed)
             if ($script:awayEnabled -and $script:idleAvailable -and $script:clockTick -ge $script:awayCheckTick) {
@@ -5842,6 +6565,11 @@ try {
                 try { Update-Jerky $menuOpen } catch { $null = Write-ErrorLog ('肉乾錯誤：' + $_.ToString()); Hide-Jerky }
             }
 
+            # 2b2) 旺旺's poop (flies, sweeping)
+            if ($script:poops.Count -gt 0) {
+                try { Update-Poops } catch { $null = Write-ErrorLog ('大便顯示錯誤：' + $_.ToString()) }
+            }
+
             # 2c) Breaking out of the screen (glass layer)
             if ($script:glassTick -ge 0) {
                 try {
@@ -5859,7 +6587,33 @@ try {
             if ($script:dogAct -ne '') {
                 $script:dogActTick++
                 $t = $script:dogActTick
+                if ($script:dogSounds) { try { Invoke-ActSound $t } catch { } }
                 switch ($script:dogAct) {
+                    'poop' {
+                        $xOffset = 0
+                        $yOffset = 0
+                        if ($t -eq 18) { Set-Bubble '嗯～～' }
+                        if ($t -ge 18 -and $t -lt 56) { $xOffset = @(0, 1, 0, -1)[$t % 4] }
+                        if ($t -eq 52) { try { Add-DogPoop } catch { $null = Write-ErrorLog ('大便錯誤：' + $_.ToString()) } }
+                        if ($t -eq 62) {
+                            $done = @('好了～舒服多了！', '嘿嘿…（右鍵 → 清潔）', '旺旺大完便了～要幫我清喔！')
+                            if (-not $script:poopToldClean) { $script:poopToldClean = $true; $done = @('大完便了～右鍵選「清潔」幫我掃乾淨喔！') }
+                            Set-Bubble ([string]$done[$script:rng.Next(0, $done.Count)])
+                        }
+                        if ($t -eq ($script:dogActLen - 1) -and $script:poops.Count -gt 0) {
+                            $script:dogAct = ''
+                            Move-AwayFromPoop $script:poops[$script:poops.Count - 1] $false
+                        }
+                    }
+                    'sulk' {
+                        $xOffset = 0
+                        $yOffset = [int][Math]::Round([Math]::Sin($t / 9.0))
+                    }
+                    'offwork' {
+                        $xOffset = 0
+                        $yOffset = 0
+                        if ($t -ge 20) { $yOffset = [int]([Math]::Abs([Math]::Sin($t / 1.6)) * -4) }
+                    }
                     'shake' {
                         # Only the head moves.
                         $xOffset = 0
@@ -6209,7 +6963,7 @@ try {
             }
 
             # 5) Free roaming (not during an action)
-            if (($script:roamEnabled -or $script:clockTick -lt $script:summonRunUntil -or $script:clockTick -lt $script:bedWalkUntil) -and -not $script:isDragging -and -not $menuOpen -and $script:dogAct -eq '' -and $script:focusState -ne 'focus') {
+            if (($script:roamEnabled -or $script:begging -or $script:clockTick -lt $script:summonRunUntil -or $script:clockTick -lt $script:bedWalkUntil -or $script:clockTick -lt $script:avoidUntil) -and -not $script:isDragging -and -not $menuOpen -and $script:dogAct -eq '' -and $script:focusState -ne 'focus') {
                 try {
                     Step-Roam
                 } catch {
@@ -6350,6 +7104,9 @@ try {
         try { if ($null -ne $script:glassForm) { $script:glassForm.Close(); $script:glassForm.Dispose() } } catch { }
         try { if ($null -ne $script:glassPlayer) { $script:glassPlayer.Dispose() } } catch { }
         try { Stop-SirenLoop; if ($null -ne $script:sirenLoopPlayer) { $script:sirenLoopPlayer.Dispose() } } catch { }
+        try { Stop-CleanMode } catch { }
+        try { foreach ($pp in @($script:poops)) { Remove-DogPoop $pp } } catch { }
+        try { foreach ($sp in @($script:dogSoundPlayers.Values)) { if ($null -ne $sp) { $sp.Dispose() } } } catch { }
         try { foreach ($bp in @($script:barkPlayers.Values)) { if ($null -ne $bp) { $bp.Stop(); $bp.Dispose() } } } catch { }
         try { if ($null -ne $script:trayIcon) { $script:trayIcon.Visible = $false; $script:trayIcon.Dispose() } } catch { }
         try { if ($null -ne $script:dotForm) { $script:dotForm.Close(); $script:dotForm.Dispose() } } catch { }
