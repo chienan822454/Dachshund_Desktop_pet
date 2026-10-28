@@ -20,7 +20,7 @@
 # =============================================================================
 param([switch]$Classic)
 $ErrorActionPreference = 'Stop'
-$script:appVersion = 'V1.22.0'
+$script:appVersion = 'V1.23.0'
 $script:appTitle = '臘腸狗桌寵 ' + $script:appVersion + '（旺旺）'
 try { $Host.UI.RawUI.WindowTitle = '旺旺（臘腸狗桌寵）- 關閉這個視窗會結束旺旺' } catch { }
 Add-Type -AssemblyName System.Windows.Forms
@@ -700,6 +700,74 @@ function Get-OutfitPicture([string]$fileName) {
     return $null
 }
 
+# Pictures for eating the jerky lying down (dachshund_3d_jeat_<name>.png). _w1/_w2 = the tail swished to each side,
+# _c1.._c3 = crumbs flying off the bite.
+$script:jeatNames = @('carry', 'carry_w1', 'carry_w2', 'hold', 'hold_w1', 'hold_w2', 'sniff', 'lickj', 'gnaw', 'gnaw_w1', 'gnaw_w2', 'gnawr', 'gnawr_w1', 'gnawr_w2',
+    'tug', 'tug2', 'snap', 'snap_c1', 'snap_c2', 'snap_c3', 'chew2', 'chew2_w1', 'chew2_w2', 'guard', 'pawshift', 'headdown', 'last', 'toss', 'catch', 'catch_w1', 'catch_w2',
+    'catch_c1', 'catch_c2', 'catch_c3', 'chew', 'chew_w1', 'chew_w2', 'crumbs', 'lick', 'lick_w1', 'lick_w2', 'sigh', 'sigh_w1', 'sigh_w2', 'lieyawn', 'doze')
+$script:jeatReady = $false
+$script:jeatPlan = @()
+
+function New-JerkyEatPlan {
+    # The order of the meal, a little different every time. Each step: picture, ticks (60 ms), bubble ('' = none), kind.
+    # kind: w = tail swishes, c = crumbs fly, n = nods while chewing, b = breathes slowly.
+    $r = $script:rng
+    $plan = New-Object System.Collections.ArrayList
+    function Add-Step([string]$pose, [int]$ticks, [string]$say, [string]$kind) {
+        $k = [Math]::Max(2, [int][Math]::Round($ticks * (0.85 + $r.NextDouble() * 0.35)))
+        [void]$plan.Add(@($pose, $k, $say, $kind))
+    }
+    Add-Step 'carry' 11 '' 'w'
+    Add-Step 'hold' 8 '' 'w'
+    Add-Step 'sniff' 6 '' ''
+    Add-Step 'lickj' 5 '' ''
+    if ($r.Next(0, 2) -eq 0) { Add-Step 'sniff' 5 '' ''; Add-Step 'lickj' 5 '' '' }
+    $gn = 2 + $r.Next(0, 2)
+    for ($i = 0; $i -lt $gn; $i++) {
+        $chewSay = ''
+        if ($i -eq 0) { $chewSay = '嚼嚼嚼～' }
+        Add-Step 'gnaw' 5 $chewSay 'wn'
+        Add-Step 'gnawr' 5 '' 'wn'
+    }
+    $tn = 1 + $r.Next(0, 2)
+    for ($i = 0; $i -lt $tn; $i++) {
+        Add-Step 'tug' 5 '' ''
+        Add-Step 'tug2' 8 '' ''
+        Add-Step 'snap' 6 '' 'c'
+        Add-Step 'chew2' 5 '' 'wn'
+        Add-Step 'chew' 5 '' 'wn'
+    }
+    if ($r.Next(0, 10) -lt 7) { Add-Step 'guard' 14 '我的！' '' }
+    Add-Step 'pawshift' 6 '' ''
+    Add-Step 'headdown' 8 '' ''
+    Add-Step 'last' 6 '' ''
+    if ($r.Next(0, 10) -lt 6) {
+        Add-Step 'toss' 5 '' ''
+        Add-Step 'catch' 5 '' 'c'
+    }
+    Add-Step 'chew' 8 '' 'wn'
+    Add-Step 'crumbs' 6 '' ''
+    Add-Step 'lick' 5 '' 'w'
+    Add-Step 'crumbs' 5 '' ''
+    Add-Step 'lick' 6 '' 'w'
+    $yum = @('好吃！♥', '肉乾好好吃！謝謝～', '最喜歡肉乾了！汪！')
+    if ($script:fedWhileHungry) { $yum = @('終於吃到了！最愛你了～♥', '肉乾好好吃！肚子不餓了～♥') }
+    Add-Step 'sigh' 11 ([string]$yum[$r.Next(0, $yum.Count)]) 'w'
+    Add-Step 'lieyawn' 10 '' ''
+    Add-Step 'doze' (40 + $r.Next(0, 40)) 'Zzz…' 'b'
+    return ,$plan.ToArray()
+}
+
+function Get-JerkyEatStep([int]$t) {
+    # Which step of the meal tick $t (counted from the end of the first bite) falls in: @(step, tick inside the step) or $null.
+    $acc = 0
+    foreach ($st in $script:jeatPlan) {
+        if ($t -lt $acc + [int]$st[1]) { return @($st, ($t - $acc)) }
+        $acc += [int]$st[1]
+    }
+    return $null
+}
+
 function Import-DogPictures {
     $main = Get-OutfitPicture 'dachshund_3d_00.png'
     if ($null -eq $main) { throw ('找不到臘腸狗圖片：' + (Join-Path $PSScriptRoot 'dachshund_3d_00.png')) }
@@ -742,6 +810,15 @@ function Import-DogPictures {
             'run_00', 'run_01', 'fall_00', 'rub_00', 'paw_00', 'jerky_00', 'jerky_01')) {
         $pp = Get-OutfitPicture ('dachshund_3d_' + $pn + '.png')
         if ($null -ne $pp) { $script:dogPoses[$pn] = $pp }
+    }
+    # Eating the thrown jerky lying down (jeat_*): only when this outfit has its own pictures (or no clothes),
+    # never the plain pictures under an outfit. Without them 旺旺 eats the jerky the short way (jerky_00/01).
+    $script:jeatReady = $true
+    foreach ($jn in $script:jeatNames) {
+        $jf = 'dachshund_3d_jeat_' + $jn + '.png'
+        $jp = $null
+        if ([string]::IsNullOrEmpty($script:outfitDir)) { $jp = Join-Path $PSScriptRoot $jf } else { $jp = Join-Path $script:outfitDir $jf }
+        if (Test-Path -LiteralPath $jp) { $script:dogPoses['jeat_' + $jn] = $jp } else { $script:jeatReady = $false }
     }
     # Flashing lights (the patrol car's light bar): clothes\<id>\lights.txt = one line per picture: pose x y w h.
     $script:outfitLights = @{}
@@ -3517,6 +3594,14 @@ function Start-DogAction([string]$name, [string]$say) {
         $script:begging = $false
         $script:begNextAt = (Get-Date).AddMinutes(20)
     }
+    $script:jeatPlan = @()
+    if ($name -eq 'jerky' -and $script:jeatReady) {
+        # Lies down and really eats it: first bite on the ground (14 ticks), then the planned meal.
+        $script:jeatPlan = New-JerkyEatPlan
+        $sum = 0
+        foreach ($st in $script:jeatPlan) { $sum += [int]$st[1] }
+        $script:dogActLen = 14 + $sum
+    }
     if ($say -eq '*') {
         $lines = @($spec.Say)
         $say = [string]$lines[$script:rng.Next(0, $lines.Count)]
@@ -4098,6 +4183,21 @@ function Get-DogFramePath {
         'jerky' {
             # Eating the jerky: bites it on the ground (jerky_00), lifts the head and chews (jerky_01), then a happy face.
             if ($t -lt 14) { return $script:dogPoses['jerky_00'] }
+            if ($script:jeatPlan.Count -gt 0) {
+                # Lying down eating it properly (see New-JerkyEatPlan).
+                $hit = Get-JerkyEatStep ($t - 14)
+                if ($null -eq $hit) { return $script:dogPoses['jeat_doze'] }
+                $st = $hit[0]
+                $k = [int]$hit[1]
+                $pose = [string]$st[0]
+                $kind = [string]$st[3]
+                if ($kind.Contains('c') -and $k -ge 1 -and $k -le 3) { return $script:dogPoses['jeat_' + $pose + '_c' + $k] }
+                if ($kind.Contains('w')) {
+                    $wagSeq = @('', '_w1', '', '_w2')
+                    return $script:dogPoses['jeat_' + $pose + $wagSeq[[int]([Math]::Floor($t / 2)) % 4]]
+                }
+                return $script:dogPoses['jeat_' + $pose]
+            }
             if ($t -lt 62) { return $script:dogPoses['jerky_01'] }
             $jerkyWag = @(0, 1, 2, 1)
             if ($script:dogHappyFrames.Count -eq 3) { return $script:dogHappyFrames[$jerkyWag[$t % 4]] }
@@ -5449,10 +5549,23 @@ try {
                     'jerky' {
                         $xOffset = 0
                         $yOffset = 0
-                        if ($t -ge 14 -and $t -lt 62) { $yOffset = @(0, -1, -2, -1)[[int]([Math]::Floor($t / 2)) % 4] }
-                        if ($t -ge 62) { $yOffset = [int]([Math]::Abs([Math]::Sin($t / 1.3)) * -6) }
-                        if ($t -eq 14) { Set-Bubble '嚼嚼嚼～' }
-                        if ($t -eq 62) {
+                        if ($script:jeatPlan.Count -gt 0) {
+                            # Eating lying down: nods while chewing, breathes slowly while dozing, bubbles at the start of a step.
+                            if ($t -ge 14) {
+                                $hit = Get-JerkyEatStep ($t - 14)
+                                if ($null -ne $hit) {
+                                    $st = $hit[0]
+                                    $k = [int]$hit[1]
+                                    $kind = [string]$st[3]
+                                    if ($kind.Contains('n')) { $yOffset = @(0, 2, 3, 1)[$k % 4] }
+                                    if ($kind.Contains('b')) { $yOffset = [int][Math]::Round(2 * [Math]::Sin($t / 6.0)) }
+                                    if ($k -eq 0 -and -not [string]::IsNullOrEmpty([string]$st[2])) { Set-Bubble ([string]$st[2]) }
+                                }
+                            }
+                        } elseif ($t -ge 14 -and $t -lt 62) { $yOffset = @(0, -1, -2, -1)[[int]([Math]::Floor($t / 2)) % 4] }
+                        if ($script:jeatPlan.Count -eq 0 -and $t -ge 62) { $yOffset = [int]([Math]::Abs([Math]::Sin($t / 1.3)) * -6) }
+                        if ($script:jeatPlan.Count -eq 0 -and $t -eq 14) { Set-Bubble '嚼嚼嚼～' }
+                        if ($script:jeatPlan.Count -eq 0 -and $t -eq 62) {
                             $yumJ = @('肉乾好好吃！謝謝～', '還有嗎？再丟一片～', '最喜歡肉乾了！汪！')
                             if ($script:fedWhileHungry) { $yumJ = @('終於吃到了！最愛你了～♥', '肉乾好好吃！肚子不餓了～♥') }
                             Set-Bubble ([string]$yumJ[$script:rng.Next(0, $yumJ.Count)])
