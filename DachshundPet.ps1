@@ -191,7 +191,7 @@ if (-not [string]::IsNullOrEmpty($UpdateMode)) {
     }
     exit 0
 }
-$script:appVersion = 'V1.25.0'
+$script:appVersion = 'V1.25.1'
 $script:appTitle = '臘腸狗桌寵 ' + $script:appVersion + '（旺旺）'
 try { $Host.UI.RawUI.WindowTitle = '旺旺（臘腸狗桌寵）- 關閉這個視窗會結束旺旺' } catch { }
 Add-Type -AssemblyName System.Windows.Forms
@@ -2884,7 +2884,32 @@ function Invoke-DogSummon {
         return
     }
     $cur = [System.Windows.Forms.Cursor]::Position
-    $wa = [System.Windows.Forms.Screen]::FromPoint($cur).WorkingArea
+    # On the same screen as the pointer: 旺旺 runs over to it (like when it breaks out of the screen).
+    # Only on another screen (or while carried) does it appear next to the pointer straight away.
+    $dogScreen = [System.Windows.Forms.Screen]::FromPoint([System.Drawing.Point]::new([int]($script:baseLocation.X + $script:form.Width / 2), [int]($script:baseLocation.Y + $script:form.Height / 2)))
+    $curScreen = [System.Windows.Forms.Screen]::FromPoint($cur)
+    if ($dogScreen.DeviceName -eq $curScreen.DeviceName -and $script:dogAct -ne 'burst' -and $script:focusState -ne 'focus') {
+        if ($script:dogAct -ne '' -and $script:dogAct -ne 'poop') { $script:dogAct = '' }
+        $script:actionMode = 'idle'
+        $script:actionTick = 0
+        $script:form.TopMost = -not $script:topMostWanted
+        $script:form.TopMost = $true
+        $script:form.TopMost = $script:topMostWanted
+        $script:roamTarget = $null
+        $script:roamPauseTicks = 0
+        $script:roamX = [double]$script:baseLocation.X
+        $script:roamY = [double]$script:baseLocation.Y
+        # Long enough to cross the whole screen at running speed (it stops as soon as it gets there).
+        $runStep = [Math]::Max(1.0, [Math]::Max($script:roamSpeed, 5.0) * 1.5 * $script:dpiScale * $script:sizeRatio)
+        $span = [double]($curScreen.WorkingArea.Width + $curScreen.WorkingArea.Height)
+        $script:summonRunUntil = $script:clockTick + [int]($span / $runStep) + 60
+        $script:viewDirty = $true
+        $runLines = @('來了來了！汪！', '等我～我跑過去！', '汪！馬上到～')
+        if ($script:outfitLights.Count -gt 0) { $runLines = @('喔咿喔咿～巡邏車汪汪出動！', '警察汪汪出動！馬上到！') }
+        Set-Bubble ([string]$runLines[$script:rng.Next(0, $runLines.Count)])
+        return
+    }
+    $wa = $curScreen.WorkingArea
     $w = $script:form.Width
     $h = $script:form.Height
     $x = [int]($cur.X - $w / 2)
