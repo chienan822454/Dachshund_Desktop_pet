@@ -191,7 +191,7 @@ if (-not [string]::IsNullOrEmpty($UpdateMode)) {
     }
     exit 0
 }
-$script:appVersion = 'V1.24.0'
+$script:appVersion = 'V1.24.1'
 $script:appTitle = '臘腸狗桌寵 ' + $script:appVersion + '（旺旺）'
 try { $Host.UI.RawUI.WindowTitle = '旺旺（臘腸狗桌寵）- 關閉這個視窗會結束旺旺' } catch { }
 Add-Type -AssemblyName System.Windows.Forms
@@ -777,6 +777,62 @@ function Get-SirenPlayer {
     return $script:sirenPlayer
 }
 
+function Get-SirenLoopPlayer {
+    # sounds\siren_loop.wav: one 喔咿 that joins up with itself, played round and round while 旺旺 runs.
+    if ($null -ne $script:sirenLoopPlayer) { return $script:sirenLoopPlayer }
+    $wav = Join-Path $PSScriptRoot 'sounds\siren_loop.wav'
+    if (-not (Test-Path -LiteralPath $wav)) { return $null }
+    try {
+        $p = New-Object System.Media.SoundPlayer($wav)
+        $p.Load()
+        $script:sirenLoopPlayer = $p
+    } catch {
+        $script:sirenLoopPlayer = $null
+        $null = Write-ErrorLog ('鳴笛聲無法播放：' + $_.ToString())
+    }
+    return $script:sirenLoopPlayer
+}
+
+function Stop-SirenLoop {
+    # (Not while another sound is playing: stopping would cut that sound off too.)
+    if ($script:sirenLooping -and $null -ne $script:sirenLoopPlayer -and $script:clockTick -ge $script:sirenHoldTick) { try { $script:sirenLoopPlayer.Stop() } catch { } }
+    $script:sirenResumeTick = 0
+    $script:sirenLooping = $false
+    $script:sirenIdleTicks = 0
+}
+
+function Update-SirenLoop([bool]$running) {
+    # 警察巡邏車汪汪: the siren sounds all the way while it runs and stops a moment after it stops running.
+    # Another sound (a bark, the breaking glass) cuts it off; then it starts again when that sound is over.
+    $want = ($running -and $script:sirenEnabled -and $script:outfitLights.Count -gt 0 -and -not $script:dogHidden)
+    if ($want) {
+        $script:sirenIdleTicks = 0
+        if (-not $script:sirenLooping -or ($script:sirenResumeTick -gt 0 -and $script:clockTick -ge $script:sirenResumeTick)) {
+            $script:sirenResumeTick = 0
+            if ($script:clockTick -lt $script:sirenHoldTick) { return }
+            $lp = Get-SirenLoopPlayer
+            if ($null -eq $lp) { return }
+            try {
+                $lp.PlayLooping()
+                $script:sirenLooping = $true
+            } catch {
+                $script:sirenLooping = $false
+            }
+        }
+        return
+    }
+    if (-not $script:sirenLooping) { return }
+    $script:sirenIdleTicks++
+    if ($script:sirenIdleTicks -ge 8 -or -not $script:sirenEnabled -or $script:outfitLights.Count -eq 0 -or $script:dogHidden) { Stop-SirenLoop }
+}
+
+function Hold-SirenLoop([double]$seconds) {
+    # Another sound has just started: the siren waits until it is over, then goes on.
+    $ticks = [int][Math]::Ceiling($seconds * 1000.0 / 60.0) + 2
+    $script:sirenHoldTick = $script:clockTick + $ticks
+    if ($script:sirenLooping) { $script:sirenResumeTick = $script:sirenHoldTick }
+}
+
 function Start-PatrolSiren([bool]$force = $false) {
     # 警察巡邏車汪汪: the light bar flashes; the siren sounds when it is switched on (at most every 20 seconds).
     if ($script:outfitLights.Count -eq 0) { return }
@@ -786,7 +842,13 @@ function Start-PatrolSiren([bool]$force = $false) {
     if (-not $force -and ($script:clockTick - $script:sirenLastTick) -lt 330) { return }
     $script:sirenLastTick = $script:clockTick
     $sp = Get-SirenPlayer
-    if ($null -ne $sp) { try { $sp.Play() } catch { } }
+    if ($null -ne $sp) {
+        try {
+            $sp.Play()
+            $script:sirenLooping = $false
+            Hold-SirenLoop 1.8
+        } catch { }
+    }
 }
 
 function Update-SmoothView {
@@ -2015,7 +2077,7 @@ function Update-GlassFx {
                 $gw = Join-Path $PSScriptRoot 'sounds\glass_break.wav'
                 if (Test-Path -LiteralPath $gw) { $script:glassPlayer = New-Object System.Media.SoundPlayer($gw); $script:glassPlayer.Load() }
             }
-            if ($null -ne $script:glassPlayer) { $script:glassPlayer.Play() }
+            if ($null -ne $script:glassPlayer) { $script:glassPlayer.Play(); Hold-SirenLoop 1.5 }
         } catch { $null = Write-ErrorLog ('玻璃聲音錯誤：' + $_.ToString()) }
     }
     $bmp = [System.Drawing.Bitmap]::new([int]$script:glassW, [int]$script:glassH, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
@@ -2321,6 +2383,7 @@ function Invoke-BarkSound([bool]$fallback = $true) {
             $player.Play()
             $script:barkLast = $player
             $script:barkSeconds = [double]$script:barkLengths[$count]
+            Hold-SirenLoop $script:barkSeconds
             return $true
         } catch { }
     }
@@ -4659,6 +4722,11 @@ try {
     $script:sirenPlayer = $null
     $script:sirenLastTick = -100000
     $script:sirenRunning = $false
+    $script:sirenLoopPlayer = $null
+    $script:sirenLooping = $false
+    $script:sirenIdleTicks = 0
+    $script:sirenResumeTick = 0
+    $script:sirenHoldTick = 0
     $script:headPatEnabled = $true
     $script:glassForm = $null
     $script:glassTick = -1
@@ -6217,15 +6285,14 @@ try {
             }
             Set-DisplayImage $displayPath
 
-            # 7b) 警察巡邏車汪汪: the light bar flashes while it runs (and the siren sounds when it starts running)
+            # 7b) 警察巡邏車汪汪: the light bar flashes and the siren sounds all the way while it runs
+            $isRunning = $false
             if ($script:outfitLights.Count -gt 0) {
                 $isRunning = ([string]$displayPath -match 'dachshund_3d_run_0')
-                if ($isRunning) {
-                    if (-not $script:sirenRunning) { try { Start-PatrolSiren } catch { } }
-                    $script:lightTicks = [Math]::Max($script:lightTicks, 25)
-                }
+                if ($isRunning) { $script:lightTicks = [Math]::Max($script:lightTicks, 25) }
                 $script:sirenRunning = $isRunning
             }
+            try { Update-SirenLoop $isRunning } catch { $null = Write-ErrorLog ('鳴笛聲錯誤：' + $_.ToString()) }
             if ($script:lightTicks -gt 0) {
                 $script:lightTicks--
                 if ($script:outfitLights.Count -eq 0) { $script:lightTicks = 0 }
@@ -6282,6 +6349,7 @@ try {
         try { if ($null -ne $script:jerkyForm) { $script:jerkyForm.Close(); $script:jerkyForm.Dispose() } } catch { }
         try { if ($null -ne $script:glassForm) { $script:glassForm.Close(); $script:glassForm.Dispose() } } catch { }
         try { if ($null -ne $script:glassPlayer) { $script:glassPlayer.Dispose() } } catch { }
+        try { Stop-SirenLoop; if ($null -ne $script:sirenLoopPlayer) { $script:sirenLoopPlayer.Dispose() } } catch { }
         try { foreach ($bp in @($script:barkPlayers.Values)) { if ($null -ne $bp) { $bp.Stop(); $bp.Dispose() } } } catch { }
         try { if ($null -ne $script:trayIcon) { $script:trayIcon.Visible = $false; $script:trayIcon.Dispose() } } catch { }
         try { if ($null -ne $script:dotForm) { $script:dotForm.Close(); $script:dotForm.Dispose() } } catch { }
