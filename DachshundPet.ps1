@@ -18,9 +18,180 @@
 #   * Outfits: optional pictures in clothes\<outfit>\ (same file names); a picture an
 #     outfit does not have falls back to the plain picture.
 # =============================================================================
-param([switch]$Classic)
+param([switch]$Classic, [string]$UpdateMode = '', [string]$UpdateDir = '', [int]$WaitPid = 0)
 $ErrorActionPreference = 'Stop'
-$script:appVersion = 'V1.23.0'
+
+# =============================================================================
+# Update helper. 關於旺旺 → 檢查更新 starts this same file again as a hidden PowerShell with -UpdateMode:
+#   check    = compares every file of the pet folder with GitHub (chienan822454/Dachshund_Desktop_pet, main),
+#   download = also downloads the new or changed files into %APPDATA%\DachshundPet\update\files (checked one by one),
+#   apply    = waits until 旺旺 has closed, copies the downloaded files into the pet folder and starts 旺旺 again.
+# It only reads from GitHub, only writes the pet's own files, never deletes a file of the pet folder and never
+# changes any Windows setting. Progress and the result go to status.txt in the update folder.
+# =============================================================================
+$script:updRepo = 'chienan822454/Dachshund_Desktop_pet'
+
+function Write-UpdStatus([hashtable]$h) {
+    $lines = @()
+    foreach ($k in $h.Keys) { $lines += ([string]$k + '=' + [string]$h[$k]) }
+    $tmp = Join-Path $UpdateDir 'status.tmp'
+    [System.IO.File]::WriteAllLines($tmp, [string[]]$lines, [System.Text.UTF8Encoding]::new($false))
+    Move-Item -LiteralPath $tmp -Destination (Join-Path $UpdateDir 'status.txt') -Force
+}
+
+function Get-GitBlobSha([string]$path) {
+    # The same fingerprint GitHub keeps for every file (SHA-1 of "blob <size>\0" + the bytes).
+    $sha = [System.Security.Cryptography.SHA1]::Create()
+    $fs = [System.IO.File]::OpenRead($path)
+    try {
+        $head = [System.Text.Encoding]::ASCII.GetBytes(('blob ' + $fs.Length) + [char]0)
+        [void]$sha.TransformBlock($head, 0, $head.Length, $null, 0)
+        $buf = New-Object byte[] 1048576
+        while (($n = $fs.Read($buf, 0, $buf.Length)) -gt 0) { [void]$sha.TransformBlock($buf, 0, $n, $null, 0) }
+        [void]$sha.TransformFinalBlock((New-Object byte[] 0), 0, 0)
+        return (($sha.Hash | ForEach-Object { $_.ToString('x2') }) -join '')
+    } finally {
+        $fs.Dispose()
+        $sha.Dispose()
+    }
+}
+
+function New-UpdClient {
+    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls12
+    $wc = New-Object System.Net.WebClient
+    try {
+        $wc.Proxy = [System.Net.WebRequest]::GetSystemWebProxy()
+        $wc.Proxy.Credentials = [System.Net.CredentialCache]::DefaultNetworkCredentials
+    } catch { }
+    return $wc
+}
+
+function Get-UpdRawUrl([string]$rel) {
+    $parts = @()
+    foreach ($q in ($rel -split '/')) { $parts += [Uri]::EscapeDataString($q) }
+    return ('https://raw.githubusercontent.com/' + $script:updRepo + '/main/' + ($parts -join '/'))
+}
+
+function Get-UpdPlan {
+    # Which files on GitHub are missing here or different: @(path, fingerprint, size) each, and the version on GitHub.
+    $wc = New-UpdClient
+    $wc.Headers['User-Agent'] = 'WangwangDesktopPet'
+    $json = [System.Text.Encoding]::UTF8.GetString($wc.DownloadData('https://api.github.com/repos/' + $script:updRepo + '/git/trees/main?recursive=1'))
+    $tree = ConvertFrom-Json $json
+    if ($tree.truncated) { throw 'GitHub 的檔案清單太長，沒有拿到完整清單' }
+    $need = @()
+    $bytes = [long]0
+    foreach ($e in $tree.tree) {
+        if ([string]$e.type -ne 'blob') { continue }
+        $rel = [string]$e.path
+        if ($rel.StartsWith('.github/')) { continue }
+        $local = Join-Path $PSScriptRoot ($rel -replace '/', '\')
+        $same = $false
+        if (Test-Path -LiteralPath $local) {
+            if ((Get-Item -LiteralPath $local).Length -eq [long]$e.size) { $same = ((Get-GitBlobSha $local) -eq [string]$e.sha) }
+        }
+        if (-not $same) {
+            $need += ,@($rel, [string]$e.sha, [long]$e.size)
+            $bytes += [long]$e.size
+        }
+    }
+    $wc.Headers['User-Agent'] = 'WangwangDesktopPet'
+    $ps = [System.Text.Encoding]::UTF8.GetString($wc.DownloadData((Get-UpdRawUrl 'DachshundPet.ps1')))
+    $ver = ''
+    $vm = [regex]::Match($ps, "appVersion = '(V[0-9.]+)'")
+    if ($vm.Success) { $ver = $vm.Groups[1].Value }
+    $wc.Dispose()
+    return @{ Need = $need; Bytes = $bytes; Version = $ver }
+}
+
+if (-not [string]::IsNullOrEmpty($UpdateMode)) {
+    try {
+        if (-not (Test-Path -LiteralPath $UpdateDir)) { [void](New-Item -ItemType Directory -Path $UpdateDir -Force) }
+        $stage = Join-Path $UpdateDir 'files'
+        $listPath = Join-Path $UpdateDir 'list.txt'
+        if ($UpdateMode -eq 'check' -or $UpdateMode -eq 'download') {
+            Write-UpdStatus @{ state = 'checking' }
+            $plan = Get-UpdPlan
+            $lines = @()
+            foreach ($f in $plan.Need) { $lines += ($f[0] + "`t" + $f[1]) }
+            [System.IO.File]::WriteAllLines($listPath, [string[]]$lines, [System.Text.UTF8Encoding]::new($false))
+            if ($plan.Need.Count -eq 0) {
+                Write-UpdStatus @{ state = 'uptodate'; version = $plan.Version }
+                exit 0
+            }
+            if ($UpdateMode -eq 'check') {
+                Write-UpdStatus @{ state = 'available'; version = $plan.Version; count = $plan.Need.Count; bytes = $plan.Bytes }
+                exit 0
+            }
+            $wc = New-UpdClient
+            $done = 0
+            $doneBytes = [long]0
+            foreach ($f in $plan.Need) {
+                $dst = Join-Path $stage ($f[0] -replace '/', '\')
+                $ok = $false
+                if (Test-Path -LiteralPath $dst) { $ok = ((Get-GitBlobSha $dst) -eq $f[1]) }
+                if (-not $ok) {
+                    $dir = Split-Path -Parent $dst
+                    if (-not (Test-Path -LiteralPath $dir)) { [void](New-Item -ItemType Directory -Path $dir -Force) }
+                    $got = $false
+                    for ($try = 0; $try -lt 3 -and -not $got; $try++) {
+                        $wc.Headers['User-Agent'] = 'WangwangDesktopPet'
+                        $wc.DownloadFile((Get-UpdRawUrl $f[0]), $dst)
+                        $got = ((Get-GitBlobSha $dst) -eq $f[1])
+                        if (-not $got) { Start-Sleep -Seconds 5 }
+                    }
+                    if (-not $got) { throw ('下載的檔案跟 GitHub 上的不一樣：' + $f[0] + '（GitHub 剛更新時可能要等幾分鐘）') }
+                }
+                $done++
+                $doneBytes += $f[2]
+                Write-UpdStatus @{ state = 'downloading'; version = $plan.Version; count = $plan.Need.Count; done = $done; bytes = $plan.Bytes; donebytes = $doneBytes }
+            }
+            $wc.Dispose()
+            Write-UpdStatus @{ state = 'ready'; version = $plan.Version; count = $plan.Need.Count; bytes = $plan.Bytes }
+            exit 0
+        }
+        if ($UpdateMode -eq 'apply') {
+            if ($WaitPid -gt 0) {
+                for ($w = 0; $w -lt 120; $w++) {
+                    if ($null -eq (Get-Process -Id $WaitPid -ErrorAction SilentlyContinue)) { break }
+                    Start-Sleep -Milliseconds 500
+                }
+            }
+            Start-Sleep -Milliseconds 800
+            $copied = 0
+            $failed = @()
+            foreach ($ln in [System.IO.File]::ReadAllLines($listPath)) {
+                $rel = ($ln -split "`t")[0]
+                if ([string]::IsNullOrEmpty($rel)) { continue }
+                $src = Join-Path $stage ($rel -replace '/', '\')
+                $dst = Join-Path $PSScriptRoot ($rel -replace '/', '\')
+                if (-not (Test-Path -LiteralPath $src)) { $failed += $rel; continue }
+                try {
+                    $dir = Split-Path -Parent $dst
+                    if (-not (Test-Path -LiteralPath $dir)) { [void](New-Item -ItemType Directory -Path $dir -Force) }
+                    Copy-Item -LiteralPath $src -Destination $dst -Force
+                    $copied++
+                } catch {
+                    $failed += $rel
+                }
+            }
+            if ($failed.Count -eq 0) {
+                try { Remove-Item -LiteralPath $stage -Recurse -Force } catch { }
+            } else {
+                [System.IO.File]::WriteAllLines((Join-Path $UpdateDir 'failed.txt'), [string[]]$failed, [System.Text.UTF8Encoding]::new($false))
+            }
+            Write-UpdStatus @{ state = 'applied'; copied = $copied; failed = $failed.Count }
+            Start-Process -FilePath (Join-Path $PSScriptRoot 'START_Dachshund.cmd') -WorkingDirectory $PSScriptRoot -WindowStyle Minimized
+            exit 0
+        }
+        Write-UpdStatus @{ state = 'error'; msg = ('unknown mode ' + $UpdateMode) }
+    } catch {
+        try { Write-UpdStatus @{ state = 'error'; msg = (($_.ToString() + ' @ line ' + $_.InvocationInfo.ScriptLineNumber) -replace "[`r`n]+", ' ') } } catch { }
+        exit 1
+    }
+    exit 0
+}
+$script:appVersion = 'V1.24.0'
 $script:appTitle = '臘腸狗桌寵 ' + $script:appVersion + '（旺旺）'
 try { $Host.UI.RawUI.WindowTitle = '旺旺（臘腸狗桌寵）- 關閉這個視窗會結束旺旺' } catch { }
 Add-Type -AssemblyName System.Windows.Forms
@@ -766,6 +937,146 @@ function Get-JerkyEatStep([int]$t) {
         $acc += [int]$st[1]
     }
     return $null
+}
+
+# -----------------------------------------------------------------------------
+# 關於旺旺 → 檢查更新 / 自動檢查更新 (the pet side; the work itself is the update helper at the top of this file).
+# Settings: %APPDATA%\DachshundPet\update.txt (auto=1/0, last=time of the last check).
+# -----------------------------------------------------------------------------
+function Get-UpdDir {
+    if ([string]::IsNullOrEmpty($script:alarmFile)) { return (Join-Path $env:TEMP 'DachshundPet_update') }
+    return (Join-Path (Split-Path -Parent $script:alarmFile) 'update')
+}
+
+function Import-UpdSetting {
+    $script:updAuto = $true
+    $script:updLast = [datetime]::MinValue
+    try {
+        if ([string]::IsNullOrEmpty($script:updFile) -or -not (Test-Path -LiteralPath $script:updFile)) { return }
+        foreach ($ln in [System.IO.File]::ReadAllLines($script:updFile)) {
+            if ($ln -eq 'auto=0') { $script:updAuto = $false }
+            if ($ln.StartsWith('last=')) {
+                $d = [datetime]::MinValue
+                if ([datetime]::TryParse($ln.Substring(5), [ref]$d)) { $script:updLast = $d }
+            }
+        }
+    } catch {
+        $null = Write-ErrorLog ('更新設定無法讀取：' + $_.ToString())
+    }
+}
+
+function Save-UpdSetting {
+    try {
+        if ([string]::IsNullOrEmpty($script:updFile)) { return }
+        $dir = Split-Path -Parent $script:updFile
+        if (-not (Test-Path -LiteralPath $dir)) { [void](New-Item -ItemType Directory -Path $dir -Force) }
+        $auto = '0'
+        if ($script:updAuto) { $auto = '1' }
+        $text = 'auto=' + $auto + "`r`n" + 'last=' + $script:updLast.ToString('s') + "`r`n"
+        [System.IO.File]::WriteAllText($script:updFile, $text, [System.Text.UTF8Encoding]::new($false))
+    } catch {
+        $null = Write-ErrorLog ('更新設定無法儲存：' + $_.ToString())
+    }
+}
+
+function Start-UpdWorker([string]$mode, [bool]$manual) {
+    if ($null -ne $script:updProc -and -not $script:updProc.HasExited) {
+        if ($manual) { Set-Bubble '我正在看有沒有新版本，等一下下～' }
+        return
+    }
+    $dir = Get-UpdDir
+    if (-not (Test-Path -LiteralPath $dir)) { [void](New-Item -ItemType Directory -Path $dir -Force) }
+    $st = Join-Path $dir 'status.txt'
+    if (Test-Path -LiteralPath $st) { Remove-Item -LiteralPath $st -Force }
+    $ps1 = Join-Path $PSScriptRoot 'DachshundPet.ps1'
+    $argLine = '-NoProfile -ExecutionPolicy RemoteSigned -WindowStyle Hidden -File "' + $ps1 + '" -UpdateMode ' + $mode + ' -UpdateDir "' + $dir + '"'
+    if ($mode -eq 'apply') { $argLine += ' -WaitPid ' + $PID }
+    $script:updProc = Start-Process -FilePath 'powershell.exe' -ArgumentList $argLine -WindowStyle Hidden -PassThru
+    $script:updMode = $mode
+    $script:updManual = $manual
+}
+
+function Read-UpdStatus {
+    $h = @{}
+    $st = Join-Path (Get-UpdDir) 'status.txt'
+    if (-not (Test-Path -LiteralPath $st)) { return $h }
+    foreach ($ln in [System.IO.File]::ReadAllLines($st)) {
+        $i = $ln.IndexOf('=')
+        if ($i -gt 0) { $h[$ln.Substring(0, $i)] = $ln.Substring($i + 1) }
+    }
+    return $h
+}
+
+function Format-UpdSize([long]$b) {
+    if ($b -ge 1048576) { return ('{0:0.0} MB' -f ($b / 1048576.0)) }
+    return ('{0:0} KB' -f [Math]::Max(1.0, $b / 1024.0))
+}
+
+function Show-UpdQuestion([string]$text) {
+    $r = [System.Windows.Forms.MessageBox]::Show([System.Windows.Forms.IWin32Window]$script:form, $text, '旺旺檢查更新',
+        [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
+    return ($r -eq [System.Windows.Forms.DialogResult]::Yes)
+}
+
+function Update-UpdWatch {
+    # Called from the clock: progress while downloading, and what to do when the helper has finished.
+    if ($null -eq $script:updProc) { return }
+    $nl = "`r`n"
+    if (-not $script:updProc.HasExited) {
+        if ($script:updMode -eq 'download') {
+            $h = Read-UpdStatus
+            if ([string]$h['state'] -eq 'downloading') {
+                try { $script:trayIcon.Text = ('旺旺下載新版中 ' + [string]$h['done'] + '/' + [string]$h['count']) } catch { }
+            }
+        }
+        return
+    }
+    $script:updProc = $null
+    try { $script:trayIcon.Text = $script:trayTextNormal } catch { }
+    $h = Read-UpdStatus
+    $state = [string]$h['state']
+    $ver = [string]$h['version']
+    if ($script:updMode -eq 'check' -or $script:updMode -eq 'download') {
+        $script:updLast = Get-Date
+        Save-UpdSetting
+    }
+    if ($state -eq 'uptodate') {
+        if ($script:updManual) { Set-Bubble ('已經是最新版了（' + $script:appVersion + '）！汪～') }
+        return
+    }
+    if ($state -eq 'available') {
+        $size = Format-UpdSize ([long]$h['bytes'])
+        if (-not $script:updManual) {
+            Set-Bubble ('旺旺有新版本 ' + $ver + ' 了！右鍵 → 關於旺旺 → 檢查更新')
+            try { $script:trayIcon.ShowBalloonTip(8000, '旺旺有新版本', ('新版本 ' + $ver + ' 可以更新了：右鍵 → 關於旺旺 → 檢查更新'), [System.Windows.Forms.ToolTipIcon]::Info) } catch { }
+            return
+        }
+        $q = '有新版本 ' + $ver + ' 了（現在是 ' + $script:appVersion + '）。' + $nl
+        if ($ver -eq $script:appVersion) { $q = '目前的版本 ' + $ver + ' 有些檔案跟 GitHub 上的不一樣（缺檔或舊檔）。' + $nl }
+        $q += '要下載 ' + [string]$h['count'] + ' 個新的或改過的檔案（約 ' + $size + '）。' + $nl + $nl +
+            '下載時旺旺照常陪你，下載好會再問你要不要更新。' + $nl + '現在下載嗎？'
+        if (Show-UpdQuestion $q) {
+            Set-Bubble '開始下載新版本～好了會告訴你！'
+            Start-UpdWorker 'download' $true
+        }
+        return
+    }
+    if ($state -eq 'ready') {
+        $q = '新版本 ' + $ver + ' 下載好了（' + [string]$h['count'] + ' 個檔案）。' + $nl + $nl +
+            '要現在更新嗎？旺旺會先關掉，更新好會自己再開起來（大約幾秒鐘）。' + $nl +
+            '只會換掉旺旺自己的檔案，你的鬧鐘和設定都會留著。'
+        if (Show-UpdQuestion $q) {
+            Start-UpdWorker 'apply' $true
+            $script:form.Close()
+        } else {
+            Set-Bubble '好～下次「檢查更新」再更新，下載好的檔案會先留著。'
+        }
+        return
+    }
+    $msg = [string]$h['msg']
+    if ([string]::IsNullOrEmpty($msg)) { $msg = '沒有結果（state=' + $state + '）' }
+    $null = Write-ErrorLog ('檢查更新錯誤：' + $msg)
+    if ($script:updManual) { Set-Bubble '連不上 GitHub，等一下再試試～（可能是網路或公司防火牆擋住了）' }
 }
 
 function Import-DogPictures {
@@ -4422,6 +4733,13 @@ try {
     Import-Birthday
     $script:dotFile = ''
     if (-not [string]::IsNullOrEmpty($script:alarmFile)) { $script:dotFile = Join-Path (Split-Path -Parent $script:alarmFile) 'dot.txt' }
+    # Checking for a new version (關於旺旺 → 檢查更新).
+    $script:updFile = ''
+    if (-not [string]::IsNullOrEmpty($script:alarmFile)) { $script:updFile = Join-Path (Split-Path -Parent $script:alarmFile) 'update.txt' }
+    $script:updProc = $null
+    $script:updMode = ''
+    $script:updManual = $false
+    Import-UpdSetting
     $script:dotForm = $null
     $script:dotTip = $null
     $script:dotBitmap = $null
@@ -5147,7 +5465,8 @@ try {
     $miClose.Add_Click({ $script:form.Close() })
     [void]$cms.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
     # About: a short description and the version number.
-    $miAbout = New-Object System.Windows.Forms.ToolStripMenuItem('關於旺旺（' + $script:appVersion + '）')
+    $miAboutRoot = New-Object System.Windows.Forms.ToolStripMenuItem('關於旺旺（' + $script:appVersion + '）')
+    $miAbout = New-Object System.Windows.Forms.ToolStripMenuItem('旺旺介紹…')
     $miAbout.Add_Click({
         try {
             $nl = "`r`n"
@@ -5169,7 +5488,7 @@ try {
                 '‧自動汪汪叫會發出旺旺真的叫聲（右鍵可以關掉聲音）' + $nl +
                 '‧開會或分享螢幕時：右鍵「先躲起來」，點右下角的旺旺圖示叫牠回來' + $nl +
                 '‧晚上 10 點～早上 7 點會回狗窩睡覺' + $nl + $nl +
-                '不連網、不安裝任何東西、不改 Windows 設定。' + $nl +
+                '不安裝任何東西、不改 Windows 設定；只有「檢查更新」時會連到 GitHub 下載旺旺自己的檔案。' + $nl +
                 '完整說明請看資料夾裡的「使用說明.txt」。'
             [void][System.Windows.Forms.MessageBox]::Show([System.Windows.Forms.IWin32Window]$script:form, $about, '關於旺旺',
                 [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
@@ -5177,7 +5496,29 @@ try {
             $null = Write-ErrorLog ('關於視窗錯誤：' + $_.ToString())
         }
     })
-    [void]$cms.Items.Add($miAbout)
+    [void]$miAboutRoot.DropDownItems.Add($miAbout)
+    $miUpd = New-Object System.Windows.Forms.ToolStripMenuItem('檢查更新')
+    $miUpd.Add_Click({
+        try {
+            Set-Bubble '我去 GitHub 看看有沒有新版本～'
+            Start-UpdWorker 'check' $true
+        } catch {
+            $null = Write-ErrorLog ('檢查更新錯誤：' + $_.ToString())
+            Set-Bubble '檢查更新沒有成功，等一下再試試～'
+        }
+    })
+    [void]$miAboutRoot.DropDownItems.Add($miUpd)
+    $miUpdAuto = New-Object System.Windows.Forms.ToolStripMenuItem('自動檢查更新（一天一次，有新版會提醒你）')
+    $miUpdAuto.CheckOnClick = $true
+    $miUpdAuto.Checked = [bool]$script:updAuto
+    $miUpdAuto.Add_Click({
+        param($sender, $e)
+        $script:updAuto = [bool]$sender.Checked
+        Save-UpdSetting
+        if ($script:updAuto) { Set-Bubble '好～我每天會去看一次有沒有新版本！' } else { Set-Bubble '好～不自動檢查了，要更新時再按「檢查更新」。' }
+    })
+    [void]$miAboutRoot.DropDownItems.Add($miUpdAuto)
+    [void]$cms.Items.Add($miAboutRoot)
     $pic.ContextMenuStrip = $cms
     $bubble.ContextMenuStrip = $cms
     $form.ContextMenuStrip = $cms
@@ -5842,6 +6183,16 @@ try {
                     }
                 } else {
                     $yOffset += [int]([Math]::Abs([Math]::Sin($script:idleTick / 1.1)) * -4)
+                }
+            }
+
+            # 5c) Checking for a new version: the helper's result, and the automatic check (once a day, from 30 s after the start).
+            if ($null -ne $script:updProc -and $script:clockTick % 16 -eq 0) {
+                try { Update-UpdWatch } catch { $script:updProc = $null; $null = Write-ErrorLog ('檢查更新錯誤：' + $_.ToString()) }
+            }
+            if ($script:updAuto -and $null -eq $script:updProc -and $script:clockTick -ge 500 -and $script:clockTick % 500 -eq 0) {
+                if (((Get-Date) - $script:updLast).TotalHours -ge 24) {
+                    try { Start-UpdWorker 'check' $false } catch { $null = Write-ErrorLog ('自動檢查更新錯誤：' + $_.ToString()) }
                 }
             }
 
