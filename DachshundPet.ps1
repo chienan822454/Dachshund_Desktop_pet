@@ -191,7 +191,7 @@ if (-not [string]::IsNullOrEmpty($UpdateMode)) {
     }
     exit 0
 }
-$script:appVersion = 'V1.28.0'
+$script:appVersion = 'V1.29.0'
 $script:appTitle = '臘腸狗桌寵 ' + $script:appVersion + '（旺旺）'
 try { $Host.UI.RawUI.WindowTitle = '旺旺（臘腸狗桌寵）- 關閉這個視窗會結束旺旺' } catch { }
 Add-Type -AssemblyName System.Windows.Forms
@@ -1674,6 +1674,7 @@ function Get-PoopSpot {
 }
 
 function Start-PoopWalk([string]$say) {
+    if (Request-PlaneLandFirst @{ Kind = 'poop'; Say = $say }) { return }
     # Like a real dog: walks off sniffing for a good spot (stopping to sniff once or twice), then turns round and squats.
     if (-not (Test-DogAction 'poop')) { Set-Bubble '少了這個動作的圖片'; return }
     if ($script:dogSleeping) { Stop-DogSleep }
@@ -1871,11 +1872,12 @@ function Import-DogPictures {
     }
     # Flying the plane (飛行員汪汪): plane_d/l/u<0-3> = nose down / level / nose up with the propeller turning,
     # plane_s<0-3> = rolling on the ground with the propeller turning, plane_st = standing still in the plane.
-    # Only the outfit's own pictures; all 17 are needed.
+    # plane_r00～r11 = the plane turned round in 30-degree steps (loop the loop). Only the outfit's own pictures; all 29 are needed.
     $script:planeReady = $false
     if (-not [string]::IsNullOrEmpty($script:outfitDir)) {
         $planeNames = @('plane_st')
         foreach ($pt in @('d', 'l', 'u', 's')) { foreach ($pk in 0..3) { $planeNames += ('plane_' + $pt + $pk) } }
+        foreach ($pk in 0..11) { $planeNames += ('plane_r' + $pk.ToString('00')) }
         $planeCount = 0
         foreach ($pn in $planeNames) {
             $pp = Join-Path $script:outfitDir ('dachshund_3d_' + $pn + '.png')
@@ -1994,6 +1996,7 @@ function Update-OutfitChecks {
 }
 
 function Set-DogOutfit([string]$id) {
+    if ($id -ne 'pilot') { $script:outfitBeforeFly = '' }
     $info = $null
     foreach ($o in $script:outfitList) {
         if ([string]$o[0] -eq $id) { $info = $o }
@@ -2043,6 +2046,10 @@ function Get-PlaneFramePath {
         'stop' { return $script:dogPoses['plane_st'] }
         'taxi' { return $script:dogPoses['plane_s' + $k] }
         'flare' { return $script:dogPoses['plane_u' + $k] }
+        'loop' {
+            $idx = [int][Math]::Round($script:planeLoopTh / ([Math]::PI / 6.0)) % 12
+            return $script:dogPoses['plane_r' + $idx.ToString('00')]
+        }
     }
     $tag = 'l'
     if ($script:planeVY -gt (1.2 * $u)) { $tag = 'd' } elseif ($script:planeVY -lt (-1.2 * $u)) { $tag = 'u' }
@@ -2100,6 +2107,83 @@ function Stop-PlaneFlight {
     $script:roamPauseTicks = 60
     $script:lastInteractTick = $script:clockTick
     Set-Bubble '飛機停好了～旺旺回來囉！'
+    Hide-PlaneBanner
+    $pend = $script:planePending
+    $script:planePending = $null
+    if (-not $script:flyMode -and -not [string]::IsNullOrEmpty($script:outfitBeforeFly)) {
+        # 飛行模式 had put on 飛行員汪汪: back in the outfit from before.
+        $back = $script:outfitBeforeFly
+        $script:outfitBeforeFly = ''
+        Set-DogOutfit $back
+    }
+    if ($null -ne $pend) {
+        $script:actionMode = 'idle'
+        Invoke-PlanePending $pend
+    }
+}
+
+function Invoke-PlanePending($pend) {
+    switch ([string]$pend.Kind) {
+        'act' { Start-DogAction ([string]$pend.Name) ([string]$pend.Say) }
+        'sleep' { Start-DogSleep ([bool]$pend.Manual) ([string]$pend.Style) ([bool]$pend.Night) }
+        'jerky' { Start-JerkyThrow }
+        'poop' { Start-PoopWalk ([string]$pend.Say) }
+        'rest' { Start-DogRest ([string]$pend.Name) ([string]$pend.Say) }
+    }
+}
+
+function Request-PlaneLandFirst($pend) {
+    # Something was asked for while 旺旺 is flying: 飛行模式 switches to 重力模式, the plane glides down to the
+    # taskbar and lands, and the asked-for thing is done after that. $true = it waits.
+    if ($script:dogAct -ne 'plane') { return $false }
+    $script:planePending = $pend
+    if ($script:flyMode -or $script:planePhase -eq 'cruise' -or $script:planePhase -eq 'loop' -or $script:planePhase -eq 'dive') {
+        $script:flyMode = $false
+        try { $script:miFly.Checked = $false } catch { }
+        $script:gravityMode = $true
+        try { $script:miGravity.Checked = $true } catch { }
+        if ($script:planePhase -eq 'loop') {
+            $script:baseLocation = [System.Drawing.Point]::new($script:baseLocation.X, [int]($script:baseLocation.Y - (Get-PlaneLoopShift)))
+            $script:planeVX = $script:planeLoopDir * 5.0 * (Get-PlaneUnit)
+        }
+        if ($script:planePhase -ne 'taxi' -and $script:planePhase -ne 'stop') {
+            $script:planePhase = 'glide'
+            $script:planeVY = [Math]::Max(0.0, $script:planeVY)
+        }
+        Set-Bubble '好～先降落，等一下喔！'
+    }
+    return $true
+}
+
+function Get-PlaneLoopShift {
+    # The loop pictures are centred lower in the frame than the flying pictures (428 → 384 of 768).
+    return [double]$script:form.Height * 44.0 / 768.0
+}
+
+function Start-PlaneTrick {
+    # 飛行模式: now and then a loop the loop or a climb and dive.
+    $b = Get-RoamBounds
+    $h = [double]$script:form.Height
+    $x = [double]$script:baseLocation.X
+    $y = [double]$script:baseLocation.Y
+    $R = $h * 0.85
+    $dir = 1.0
+    if ($script:facingLeft) { $dir = -1.0 }
+    $loopOk = (($y - 2.0 * $R) -ge [double]$b[2]) -and (($x + $dir * $R) -ge [double]$b[0]) -and (($x + $dir * $R) -le [double]$b[1])
+    if ($loopOk -and $script:rng.Next(0, 3) -ne 0) {
+        $script:planeLoopCX = $x
+        $script:planeLoopCY = $y - $R
+        $script:planeLoopTh = 0.0
+        $script:planeLoopDir = $dir
+        $script:planePhase = 'loop'
+        Set-Bubble '翻個筋斗～！'
+        return
+    }
+    if (($y - $h * 1.2) -ge [double]$b[2]) {
+        $script:planeTrickTick = 0
+        $script:planePhase = 'dive'
+        Set-Bubble '衝高高～俯衝！'
+    }
 }
 
 function Update-PlaneFlight {
@@ -2158,6 +2242,40 @@ function Update-PlaneFlight {
         'stop' {
             if ($script:clockTick -ge $script:planeStopTick) { Stop-PlaneFlight; return }
         }
+        'loop' {
+            # Round a circle above the spot where it started; the plane turns with it.
+            $R = [Math]::Max(1.0, [double]$script:form.Height * 0.85)
+            $script:planeLoopTh += 7.0 * $u * $script:flySpeed / $R
+            $script:planeVX = $script:planeLoopDir * 5.0 * $u
+            $script:planeVY = 0.0
+            if ($script:planeLoopTh -ge (2.0 * [Math]::PI)) {
+                $script:planeLoopTh = 0.0
+                $script:planePhase = 'cruise'
+                $script:planeTarget = $null
+                $x = $script:planeLoopCX
+                $y = $script:planeLoopCY + $R
+                $flyLines = @('漂亮吧！', '再來一次？', '旺旺特技表演～')
+                Set-Bubble ([string]$flyLines[$script:rng.Next(0, $flyLines.Count)])
+            } else {
+                $x = $script:planeLoopCX + $script:planeLoopDir * $R * [Math]::Sin($script:planeLoopTh)
+                $y = $script:planeLoopCY + $R * [Math]::Cos($script:planeLoopTh) + (Get-PlaneLoopShift)
+            }
+        }
+        'dive' {
+            # Climbs steeply, then dives down and levels out again.
+            $b = Get-RoamBounds
+            $script:planeTrickTick++
+            $want = -8.0 * $u * $script:flySpeed
+            if ($script:planeTrickTick -gt 22) { $want = 9.0 * $u * $script:flySpeed }
+            $script:planeVY += ($want - $script:planeVY) * 0.25
+            if ($script:planeTrickTick -gt 46 -or ($script:planeTrickTick -gt 22 -and $y -ge ([double]$b[3] - 4))) {
+                $script:planePhase = 'cruise'
+                $script:planeTarget = $null
+            }
+            if ($y -le ([double]$b[2] + 2) -and $script:planeTrickTick -le 22) { $script:planeTrickTick = 23 }
+            $x = [Math]::Min([double]$b[1], [Math]::Max([double]$b[0], $x + $script:planeVX))
+            $y = [Math]::Min([double]$b[3], [Math]::Max([double]$b[2], $y + $script:planeVY))
+        }
         'cruise' {
             # 飛行模式: flies to one spot after another anywhere on the screen (to the mouse pointer when called).
             $b = Get-RoamBounds
@@ -2176,8 +2294,8 @@ function Update-PlaneFlight {
             $dx = [double]$script:planeTarget.X - $x
             $dy = [double]$script:planeTarget.Y - $y
             $d = [Math]::Sqrt($dx * $dx + $dy * $dy)
-            $speed = 6.0 * $u
-            if ($called) { $speed = 9.0 * $u }
+            $speed = 6.0 * $u * $script:flySpeed
+            if ($called) { $speed = 9.0 * $u * [Math]::Max(1.0, $script:flySpeed) }
             if ($d -gt 1) {
                 $script:planeVX += ($dx / $d * $speed - $script:planeVX) * 0.05
                 $script:planeVY += ($dy / $d * $speed * 0.7 - $script:planeVY) * 0.05
@@ -2189,7 +2307,9 @@ function Update-PlaneFlight {
                 if ($called) {
                     $script:summonRunUntil = 0
                     Set-Bubble '飛過來了！汪！'
-                } elseif ($script:rng.Next(0, 4) -eq 0) {
+                } elseif ($script:rng.Next(0, 3) -eq 0) {
+                    Start-PlaneTrick
+                } elseif ($script:rng.Next(0, 3) -eq 0) {
                     $flyLines = @('咻～～', '飛高高！', '旺旺機長報到！', '噗噗噗～')
                     Set-Bubble ([string]$flyLines[$script:rng.Next(0, $flyLines.Count)])
                 }
@@ -2197,15 +2317,212 @@ function Update-PlaneFlight {
         }
         default { $script:dogAct = ''; return }
     }
-    if ([Math]::Abs($script:planeVX) -gt (0.3 * $u)) { $script:facingLeft = ($script:planeVX -lt 0) }
+    if ($script:planePhase -ne 'loop' -and [Math]::Abs($script:planeVX) -gt (0.3 * $u)) { $script:facingLeft = ($script:planeVX -lt 0) }
     $script:baseLocation = [System.Drawing.Point]::new([int][Math]::Round($x), [int][Math]::Round($y))
+}
+
+function Set-FlySpeed([double]$speed) {
+    $script:flySpeed = $speed
+    foreach ($mi in $script:miFlySpeed) { try { $mi.Checked = ([double]$mi.Tag -eq $speed) } catch { } }
+    if ($speed -lt 1.0) { Set-Bubble '慢慢飛～欣賞風景' } elseif ($speed -gt 1.0) { Set-Bubble '全速前進！咻～' } else { Set-Bubble '一般速度飛行～' }
+}
+
+# ----- 飛機彩帶留言: a banner with your message, towed behind the plane -----
+function Import-BannerSetting {
+    try {
+        if ([string]::IsNullOrEmpty($script:bannerFile) -or -not (Test-Path -LiteralPath $script:bannerFile)) { return }
+        $txt = [System.IO.File]::ReadAllText($script:bannerFile, [System.Text.Encoding]::UTF8).Trim()
+        if ($txt.Length -gt 20) { $txt = $txt.Substring(0, 20) }
+        $script:bannerText = $txt
+    } catch { $null = Write-ErrorLog ('彩帶留言無法讀取：' + $_.ToString()) }
+}
+
+function Save-BannerSetting {
+    try {
+        if ([string]::IsNullOrEmpty($script:bannerFile)) { return }
+        $dir = Split-Path -Parent $script:bannerFile
+        if (-not (Test-Path -LiteralPath $dir)) { [void](New-Item -ItemType Directory -Path $dir -Force) }
+        [System.IO.File]::WriteAllText($script:bannerFile, $script:bannerText, [System.Text.UTF8Encoding]::new($false))
+    } catch { $null = Write-ErrorLog ('彩帶留言無法儲存：' + $_.ToString()) }
+}
+
+function Get-BannerMenuText {
+    if ([string]::IsNullOrEmpty($script:bannerText)) { return '飛機彩帶留言：沒有（點這裡寫）…' }
+    return ('飛機彩帶留言：「' + $script:bannerText + '」（點這裡修改）…')
+}
+
+function Show-BannerDialog {
+    $f = New-Object System.Windows.Forms.Form
+    $f.Text = '飛機彩帶留言'
+    $f.FormBorderStyle = 'FixedDialog'
+    $f.MaximizeBox = $false
+    $f.MinimizeBox = $false
+    $f.StartPosition = 'CenterScreen'
+    $f.TopMost = $true
+    $f.ClientSize = [System.Drawing.Size]::new((Get-Scaled 340), (Get-Scaled 150))
+    $lbl = New-Object System.Windows.Forms.Label
+    $lbl.Text = '旺旺開飛機時，飛機後面拖著寫了這句話的彩帶（最多 20 個字；空白 = 不拖彩帶）：'
+    $lbl.Size = [System.Drawing.Size]::new((Get-Scaled 312), (Get-Scaled 36))
+    $lbl.Location = [System.Drawing.Point]::new((Get-Scaled 14), (Get-Scaled 12))
+    $tb = New-Object System.Windows.Forms.TextBox
+    $tb.MaxLength = 20
+    $tb.Text = $script:bannerText
+    $tb.Width = Get-Scaled 312
+    $tb.Location = [System.Drawing.Point]::new((Get-Scaled 14), (Get-Scaled 56))
+    $ok = New-Object System.Windows.Forms.Button
+    $ok.Text = '確定'
+    $ok.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    $ok.Location = [System.Drawing.Point]::new((Get-Scaled 160), (Get-Scaled 104))
+    $cancel = New-Object System.Windows.Forms.Button
+    $cancel.Text = '取消'
+    $cancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $cancel.Location = [System.Drawing.Point]::new((Get-Scaled 245), (Get-Scaled 104))
+    $f.Controls.AddRange(@($lbl, $tb, $ok, $cancel))
+    $f.AcceptButton = $ok
+    $f.CancelButton = $cancel
+    try {
+        if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+            $script:bannerText = $tb.Text.Trim()
+            Save-BannerSetting
+            try { $script:miBanner.Text = (Get-BannerMenuText) } catch { }
+            if ([string]::IsNullOrEmpty($script:bannerText)) { Set-Bubble '好，飛機不拖彩帶了' } else { Set-Bubble ('開飛機時幫你拉彩帶：「' + $script:bannerText + '」') }
+            Hide-PlaneBanner
+        }
+    } finally {
+        $f.Dispose()
+    }
+}
+
+function Hide-PlaneBanner {
+    if ($null -ne $script:bannerForm -and $script:bannerShown) {
+        try { $script:bannerForm.Location = [System.Drawing.Point]::new(-25000, -25000) } catch { }
+    }
+    $script:bannerShown = $false
+}
+
+function Update-PlaneBanner {
+    # Drawn every other tick (the banner flutters); placed behind the plane's tail every tick.
+    $phase = $script:planePhase
+    $show = (-not [string]::IsNullOrEmpty($script:bannerText) -and $script:dogAct -eq 'plane' -and
+        ($phase -eq 'cruise' -or $phase -eq 'glide' -or $phase -eq 'land' -or $phase -eq 'flare' -or $phase -eq 'dive') -and
+        -not $script:dogHidden -and -not $script:dogBehind)
+    if (-not $show) { Hide-PlaneBanner; return }
+    $W = [double]$script:form.Width
+    $H = [double]$script:form.Height
+    $px = [float][Math]::Max(9.0, $H * 0.075)
+    if ($null -eq $script:bannerForm) {
+        $f = $null
+        if ($script:glassAvailable) { try { $f = New-Object WangwangFx.GlassForm } catch { $f = $null } }
+        if ($null -eq $f) { $f = New-Object System.Windows.Forms.Form }
+        $f.Text = '旺旺的彩帶'
+        $f.FormBorderStyle = 'None'
+        $f.StartPosition = 'Manual'
+        $f.ShowInTaskbar = $false
+        $f.BackColor = [System.Drawing.Color]::Magenta
+        $f.TransparencyKey = [System.Drawing.Color]::Magenta
+        $f.BackgroundImageLayout = [System.Windows.Forms.ImageLayout]::None
+        $f.Location = [System.Drawing.Point]::new(-25000, -25000)
+        $f.Size = [System.Drawing.Size]::new(10, 10)
+        $script:bannerForm = $f
+    }
+    $f = $script:bannerForm
+    $font = [System.Drawing.Font]::new('Microsoft JhengHei UI', $px, [System.Drawing.FontStyle]::Bold, [System.Drawing.GraphicsUnit]::Pixel)
+    try {
+        $tmp = [System.Drawing.Bitmap]::new(4, 4)
+        $tg = [System.Drawing.Graphics]::FromImage($tmp)
+        try { $ts = $tg.MeasureString($script:bannerText, $font) } finally { $tg.Dispose(); $tmp.Dispose() }
+        $bw = [double]$ts.Width + $px * 1.2
+        $bh = [double]$px * 1.8
+        $amp = $bh * 0.14
+        $rope = $W * 0.12
+        $fw = [int][Math]::Ceiling($bw + $rope + 4)
+        $fh = [int][Math]::Ceiling($bh + 2 * $amp + 6)
+        $left = [bool]$script:facingLeft
+        # The tail of the plane (about 5 % in from its back end, half way down).
+        $ax = [double]$script:form.Location.X + $W * 0.06
+        if ($left) { $ax = [double]$script:form.Location.X + $W * 0.94 }
+        $ay = [double]$script:form.Location.Y + $H * 0.5
+        $wx = if ($left) { $ax } else { $ax - $fw }
+        $loc = [System.Drawing.Point]::new([int][Math]::Round($wx), [int][Math]::Round($ay - $fh / 2.0))
+        if (($script:clockTick % 2) -eq 0 -or -not $script:bannerShown -or $f.Width -ne $fw -or $f.Height -ne $fh) {
+            $bmp = [System.Drawing.Bitmap]::new($fw, $fh, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+            try {
+                $g = [System.Drawing.Graphics]::FromImage($bmp)
+                try {
+                    $g.Clear([System.Drawing.Color]::Transparent)
+                    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+                    $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAliasGridFit
+                    # Banner from bx0 to bx1; the rope from the banner's front edge to the tail.
+                    $bx0 = 2.0; $bx1 = 2.0 + $bw; $tailX = [double]$fw - 1
+                    if ($left) { $bx0 = $rope + 2; $bx1 = $rope + 2 + $bw; $tailX = 1.0 }
+                    $midY = $fh / 2.0
+                    $ph = [double]$script:clockTick * 0.5
+                    $n = 12
+                    $pts = New-Object 'System.Drawing.PointF[]' (2 * $n + 2)
+                    for ($i = 0; $i -le $n; $i++) {
+                        $xx = $bx0 + $bw * $i / $n
+                        # The wave runs from the rope end backwards and grows towards the loose end.
+                        $far = if ($left) { $i / [double]$n } else { 1.0 - $i / [double]$n }
+                        $off = [Math]::Sin($ph - $far * 5.0) * $amp * (0.3 + 0.7 * $far)
+                        $pts[$i] = [System.Drawing.PointF]::new([float]$xx, [float]($midY - $bh / 2.0 + $off))
+                        $pts[2 * $n + 1 - $i] = [System.Drawing.PointF]::new([float]$xx, [float]($midY + $bh / 2.0 + $off))
+                    }
+                    $fill = [System.Drawing.SolidBrush]::new([System.Drawing.Color]::FromArgb(255, 255, 248, 225))
+                    $edge = [System.Drawing.Pen]::new([System.Drawing.Color]::FromArgb(255, 210, 40, 40), [float][Math]::Max(1.5, $px / 9.0))
+                    $ropePen = [System.Drawing.Pen]::new([System.Drawing.Color]::FromArgb(255, 120, 90, 60), [float][Math]::Max(1.2, $px / 12.0))
+                    $ink = [System.Drawing.SolidBrush]::new([System.Drawing.Color]::FromArgb(255, 190, 30, 30))
+                    try {
+                        $frontX = if ($left) { $bx0 } else { $bx1 }
+                        $frontI = if ($left) { 0 } else { $n }
+                        $topF = $pts[$frontI]; $botF = $pts[2 * $n + 1 - $frontI]
+                        $g.DrawLine($ropePen, [float]$frontX, [float]$topF.Y, [float]$tailX, [float]$midY)
+                        $g.DrawLine($ropePen, [float]$frontX, [float]$botF.Y, [float]$tailX, [float]$midY)
+                        $g.FillPolygon($fill, $pts)
+                        $g.DrawPolygon($edge, $pts)
+                        $sf = [System.Drawing.StringFormat]::new()
+                        try {
+                            $sf.Alignment = [System.Drawing.StringAlignment]::Center
+                            $sf.LineAlignment = [System.Drawing.StringAlignment]::Center
+                            $cOff = $pts[[int]($n / 2)].Y - ($midY - $bh / 2.0)
+                            $rect = [System.Drawing.RectangleF]::new([float]$bx0, [float]($midY - $bh / 2.0 + $cOff), [float]$bw, [float]$bh)
+                            $g.DrawString($script:bannerText, $font, $ink, $rect, $sf)
+                        } finally { $sf.Dispose() }
+                    } finally { $fill.Dispose(); $edge.Dispose(); $ropePen.Dispose(); $ink.Dispose() }
+                } finally { $g.Dispose() }
+                $keyed = [System.Drawing.Bitmap]::new($fw, $fh, [System.Drawing.Imaging.PixelFormat]::Format24bppRgb)
+                $kg = [System.Drawing.Graphics]::FromImage($keyed)
+                try {
+                    $kg.Clear([System.Drawing.Color]::Magenta)
+                    $cut = Convert-AlphaCut $bmp
+                    try { $kg.DrawImageUnscaled($cut, 0, 0) } finally { $cut.Dispose() }
+                } finally { $kg.Dispose() }
+            } finally { $bmp.Dispose() }
+            if ($f.Width -ne $fw -or $f.Height -ne $fh) { $f.Size = [System.Drawing.Size]::new($fw, $fh) }
+            $old = $f.BackgroundImage
+            $f.BackgroundImage = $keyed
+            if ($null -ne $old) { $old.Dispose() }
+        }
+        if ($f.Location -ne $loc) { $f.Location = $loc }
+        if (-not $f.Visible) {
+            $f.TopMost = $script:topMostWanted
+            $f.Show()
+            # 旺旺 stays in front of its banner.
+            $script:form.TopMost = -not $script:topMostWanted
+            $script:form.TopMost = $true
+            $script:form.TopMost = $script:topMostWanted
+        }
+        $script:bannerShown = $true
+        $f.Refresh()
+    } finally { $font.Dispose() }
 }
 
 function Set-FlyMode([bool]$on) {
     if ($on) {
         if (-not $script:planeReady) {
-            # Only 飛行員汪汪 has the plane: puts it on first.
+            # Only 飛行員汪汪 has the plane: puts it on first (and the outfit from before goes back on after landing).
+            $before = $script:outfitId
             Set-DogOutfit 'pilot'
+            if ($script:planeReady) { $script:outfitBeforeFly = $before }
             if (-not $script:planeReady) {
                 $script:flyMode = $false
                 try { $script:miFly.Checked = $false } catch { }
@@ -4317,6 +4634,7 @@ function Show-AlarmManager {
 # Interactions: welcome back, fling, teasing, health reminders, focus timer, holiday clothes, hunger
 # -----------------------------------------------------------------------------
 function Start-DogRest([string]$kind, [string]$say) {
+    if (Request-PlaneLandFirst @{ Kind = 'rest'; Name = $kind; Say = $say }) { return }
     # $kind = 'wait' (waiting for the person to come back) or 'focus' (lying quietly during a focus period).
     if (-not $script:dogPoses.ContainsKey('lie_00')) { return }
     $script:dogSleeping = $false
@@ -4927,6 +5245,7 @@ function Test-DogAction([string]$name) {
 
 function Start-DogAction([string]$name, [string]$say) {
     # $say: '' = no bubble, '*' = a random line for this action, anything else = that text.
+    if (Request-PlaneLandFirst @{ Kind = 'act'; Name = $name; Say = $say }) { return }
     if (-not (Test-DogAction $name)) { Set-Bubble '少了這個動作的圖片'; return }
     $spec = $script:dogActionSpec[$name]
     # 心情: attention makes 旺旺 happier; a sulking 旺旺 forgives you.
@@ -5083,6 +5402,7 @@ function Hide-Jerky {
 }
 
 function Start-JerkyThrow {
+    if (Request-PlaneLandFirst @{ Kind = 'jerky' }) { return }
     if (-not (Test-DogAction 'jerky')) { Set-Bubble '這件衣服還沒有吃肉乾的圖片，換別件或脫掉衣服再試試～'; return }
     if (-not (Test-Path -LiteralPath $script:jerkyPath)) { Set-Bubble '找不到肉乾的圖片（jerky.png）'; return }
     if ($script:dogAct -eq 'jerky') { Set-Bubble '我還在吃上一片～等一下！'; return }
@@ -5233,6 +5553,7 @@ function Start-RandomDogAction {
 }
 
 function Start-DogSleep([bool]$manual, [string]$style = '', [bool]$night = $false) {
+    if (Request-PlaneLandFirst @{ Kind = 'sleep'; Manual = $manual; Style = $style; Night = $night }) { return }
     # $style: 'sleep_00' (chin on the paws), 'sidesleep_00' (on its side), 'belly_00' (belly up),
     #         'flat_00' (flat on its side, belly out), 'curl_00' (curled up), 'bed_00' (in its dog bed), '' = random.
     if (-not ($script:dogPoses.ContainsKey('lie_00') -and $script:dogPoses.ContainsKey('sleep_00'))) { Set-Bubble '少了睡覺的圖片'; return }
@@ -5719,6 +6040,19 @@ try {
     $script:planeReady = $false
     $script:miGravity = $null
     $script:miFly = $null
+    $script:flySpeed = 1.0            # 飛行速度: 0.6 slow / 1.0 normal / 1.6 fast
+    $script:miFlySpeed = @()
+    $script:planeTrickTick = 0
+    $script:planeLoopCX = 0.0
+    $script:planeLoopCY = 0.0
+    $script:planeLoopTh = 0.0
+    $script:planeLoopDir = 1.0
+    $script:planePending = $null      # what was asked for during 飛行模式: done after landing
+    $script:outfitBeforeFly = ''      # the outfit before 飛行模式 put on 飛行員汪汪 (back on after landing)
+    $script:bannerText = ''           # 飛機彩帶留言 ('' = no banner)
+    $script:bannerForm = $null
+    $script:bannerShown = $false
+    $script:miBanner = $null
     $script:roamTarget = $null
     $script:roamPauseTicks = 60
     $script:roamMoving = $false
@@ -5853,15 +6187,18 @@ try {
     $script:chewSoundTick = -100
     $script:moodFile = ''
     $script:dailyFile = ''
+    $script:bannerFile = ''
     if (-not [string]::IsNullOrEmpty($script:alarmFile)) {
         $script:moodFile = Join-Path (Split-Path -Parent $script:alarmFile) 'mood.txt'
         $script:dailyFile = Join-Path (Split-Path -Parent $script:alarmFile) 'daily.txt'
+        $script:bannerFile = Join-Path (Split-Path -Parent $script:alarmFile) 'banner.txt'
     }
     Import-DogMood
     $script:moodDecayAt = (Get-Date).AddMinutes(15)
     $script:sulkNextAt = (Get-Date).AddMinutes(20)
     $script:dailyEnabled = $true
     Import-DailySetting
+    Import-BannerSetting
     $script:poops = New-Object System.Collections.ArrayList
     $script:poopEnabled = $true
     $script:poopSrc = $null
@@ -6404,6 +6741,24 @@ try {
     })
     [void]$cms.Items.Add($miFly)
     $script:miFly = $miFly
+    $miSpeedFly = New-Object System.Windows.Forms.ToolStripMenuItem('飛行速度')
+    $speedItems = @()
+    foreach ($fs in @(@('慢', 0.6), @('一般', 1.0), @('快', 1.6))) {
+        $fsi = New-Object System.Windows.Forms.ToolStripMenuItem([string]$fs[0])
+        $fsi.Tag = [double]$fs[1]
+        $fsi.Checked = ([double]$fs[1] -eq $script:flySpeed)
+        $fsi.Add_Click({
+            param($sender, $e)
+            try { Set-FlySpeed ([double]$sender.Tag) } catch { $null = Write-ErrorLog ('飛行速度錯誤：' + $_.ToString()) }
+        })
+        [void]$miSpeedFly.DropDownItems.Add($fsi)
+        $speedItems += $fsi
+    }
+    $script:miFlySpeed = $speedItems
+    [void]$cms.Items.Add($miSpeedFly)
+    $script:miBanner = New-Object System.Windows.Forms.ToolStripMenuItem((Get-BannerMenuText))
+    $script:miBanner.Add_Click({ try { Show-BannerDialog } catch { $null = Write-ErrorLog ('彩帶留言設定錯誤：' + $_.ToString()) } })
+    [void]$cms.Items.Add($script:miBanner)
     [void]$cms.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
 
     $miAuto = New-Object System.Windows.Forms.ToolStripMenuItem('自動汪汪叫')
@@ -7424,6 +7779,7 @@ try {
             # Breaking out of the screen: out of sight until it lands.
             if ($script:dogAct -eq 'burst' -and $script:dogActTick -lt 22) { $dogLoc = [System.Drawing.Point]::new(-25000, -25000) }
             $script:form.Location = $dogLoc
+            try { Update-PlaneBanner } catch { $null = Write-ErrorLog ('彩帶錯誤：' + $_.ToString()); $script:bannerText = '' }
             $displayPath = $null
             $dogPath = Get-DogFramePath
             if ($null -ne $dogPath -and -not $script:badPaths.ContainsKey([string]$dogPath)) { $displayPath = [string]$dogPath }
@@ -7500,6 +7856,7 @@ try {
         try { if ($null -ne $script:glassPlayer) { $script:glassPlayer.Dispose() } } catch { }
         try { Stop-SirenLoop; if ($null -ne $script:sirenLoopPlayer) { $script:sirenLoopPlayer.Dispose() } } catch { }
         try { Stop-CleanMode } catch { }
+        try { if ($null -ne $script:bannerForm) { $script:bannerForm.Close(); $script:bannerForm.Dispose() } } catch { }
         try { foreach ($pp in @($script:poops)) { Remove-DogPoop $pp } } catch { }
         try { foreach ($sp in @($script:dogSoundPlayers.Values)) { if ($null -ne $sp) { $sp.Dispose() } } } catch { }
         try { foreach ($bp in @($script:barkPlayers.Values)) { if ($null -ne $bp) { $bp.Stop(); $bp.Dispose() } } } catch { }
