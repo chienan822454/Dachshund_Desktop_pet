@@ -191,7 +191,7 @@ if (-not [string]::IsNullOrEmpty($UpdateMode)) {
     }
     exit 0
 }
-$script:appVersion = 'V1.31.0'
+$script:appVersion = 'V1.31.1'
 $script:appTitle = '臘腸狗桌寵 ' + $script:appVersion + '（旺旺）'
 try { $Host.UI.RawUI.WindowTitle = '旺旺（臘腸狗桌寵）- 關閉這個視窗會結束旺旺' } catch { }
 Add-Type -AssemblyName System.Windows.Forms
@@ -666,6 +666,47 @@ function Reset-ImageCache([int]$size) {
     $script:warmIndex = 0
 }
 
+function Set-BadPicture([string]$path, [string]$err) {
+    # A picture that could not be read. A OneDrive file that is only in the cloud (not downloaded to this PC yet)
+    # is tried again a few seconds later, while OneDrive downloads it; anything else is skipped from now on.
+    $script:badPaths[$path] = $true
+    if ($err -match 'cloud|雲端|0x8007016A|0x80070185|offline|離線') { $script:badRetry[$path] = $script:clockTick + 60 }
+    if (-not $script:badLogged.ContainsKey($path)) {
+        $script:badLogged[$path] = $true
+        $null = Write-ErrorLog ('圖片無法載入：' + $path + "`r`n" + $err)
+    }
+}
+
+function Update-BadPictures {
+    # Every few seconds: cloud-only pictures get another try.
+    if ($script:badRetry.Count -eq 0) { return }
+    foreach ($bp in @($script:badRetry.Keys)) {
+        if ($script:clockTick -ge [int]$script:badRetry[$bp]) {
+            $script:badRetry.Remove($bp)
+            [void]$script:badPaths.Remove($bp)
+        }
+    }
+}
+
+function Get-PlaneFallbackPath([string]$want) {
+    # Flying the plane and this picture cannot be shown yet: another plane picture, never 旺旺 without the plane.
+    $order = @()
+    if ($want -match 'plane_([dlus])(\d)\.png$') {
+        $tg = $Matches[1]
+        foreach ($pk in 0..3) { $order += ('plane_' + $tg + $pk) }
+    }
+    foreach ($pk in 0..3) { $order += ('plane_l' + $pk) }
+    $order += 'plane_st'
+    foreach ($pk in 0..3) { $order += ('plane_s' + $pk) }
+    foreach ($nm in $order) {
+        if ($script:dogPoses.ContainsKey($nm)) {
+            $pp = [string]$script:dogPoses[$nm]
+            if (-not $script:badPaths.ContainsKey($pp)) { return $pp }
+        }
+    }
+    return $null
+}
+
 function Set-DisplayImage([string]$path) {
     if ([string]::IsNullOrWhiteSpace($path)) { return }
     if ($script:badPaths.ContainsKey($path)) { return }
@@ -675,8 +716,7 @@ function Set-DisplayImage([string]$path) {
     try {
         $img = Get-DisplayBitmap $path $flip
     } catch {
-        $script:badPaths[$path] = $true
-        $null = Write-ErrorLog ('圖片無法載入：' + $path + "`r`n" + $_.ToString())
+        Set-BadPicture $path $_.ToString()
         return
     }
     $script:pic.Image = $img
@@ -6499,6 +6539,8 @@ try {
     $script:bmpCache = @{}
     $script:pathKey = @{}
     $script:badPaths = @{}
+    $script:badRetry = @{}            # pictures OneDrive has not downloaded yet: tried again later (path → tick)
+    $script:badLogged = @{}
     $script:currentImagePath = $null
     $script:alphaCutOk = $true
     $script:alphaCutTested = $false
@@ -8118,14 +8160,28 @@ try {
             $script:form.Location = $dogLoc
             try { Update-PlaneBanner } catch { $null = Write-ErrorLog ('彩帶錯誤：' + $_.ToString()); $script:bannerText = '' }
             $displayPath = $null
+            if (($script:clockTick % 20) -eq 0) { Update-BadPictures }
             $dogPath = Get-DogFramePath
             if ($null -ne $dogPath -and -not $script:badPaths.ContainsKey([string]$dogPath)) { $displayPath = [string]$dogPath }
+            $inPlane = ($script:dogAct -eq 'plane')
+            if ($null -eq $displayPath -and $inPlane) {
+                # In the plane: another plane picture, or keep the one on the screen now.
+                $displayPath = Get-PlaneFallbackPath ([string]$dogPath)
+                if ($null -eq $displayPath) { $displayPath = '' }
+            }
             if ($null -eq $displayPath) {
                 $frameTick = if ($script:actionMode -eq 'idle') { $script:idleTick } else { $script:actionTick }
                 $frameMode = if ($script:roamMoving -and $script:actionMode -eq 'idle') { 'walk' } else { $script:actionMode }
                 $displayPath = Get-WagFramePath $frameMode $frameTick
             }
-            Set-DisplayImage $displayPath
+            if ($displayPath -ne '') {
+                Set-DisplayImage $displayPath
+                if ($inPlane -and $script:badPaths.ContainsKey($displayPath)) {
+                    # Just failed to load: show another plane picture straight away.
+                    $alt = Get-PlaneFallbackPath $displayPath
+                    if ($null -ne $alt) { Set-DisplayImage $alt }
+                }
+            }
 
             # 7b) 警察巡邏車汪汪: the light bar flashes and the siren sounds all the way while it runs
             $isRunning = $false
@@ -8149,7 +8205,9 @@ try {
                     try {
                         $null = Get-DisplayBitmap $warmPath $false
                     } catch {
-                        $script:badPaths[$warmPath] = $true
+                        Set-BadPicture $warmPath $_.ToString()
+                        # Cloud-only: back on the list, so it is prepared once OneDrive has downloaded it.
+                        if ($script:badRetry.ContainsKey($warmPath)) { $script:warmList.Add($warmPath) }
                     }
                 }
             }
@@ -8224,6 +8282,16 @@ try {
     try { (Get-TrayIcon).Visible = $true } catch { $null = Write-ErrorLog ('右下角圖示錯誤：' + $_.ToString()) }
     # The start shortcut with 旺旺's start icon, next to START_Dachshund.cmd (kept up to date if the folder moved).
     try { $null = New-StartShortcut $PSScriptRoot } catch { $null = Write-ErrorLog ('開啟旺旺捷徑無法建立：' + $_.ToString()) }
+    # In a OneDrive folder with Files On-Demand, pictures may be only in the cloud (they flash by as 旺旺 without
+    # the costume while OneDrive downloads them): asks OneDrive to keep 旺旺's own folder on this PC.
+    if ($PSScriptRoot -match 'OneDrive') {
+        try {
+            $attrib = Join-Path $env:SystemRoot 'System32\attrib.exe'
+            if (Test-Path -LiteralPath $attrib) {
+                Start-Process -FilePath $attrib -ArgumentList @('+P', '-U', '/S', '/D', ('"' + (Join-Path $PSScriptRoot '*') + '"')) -WindowStyle Hidden
+            }
+        } catch { $null = Write-ErrorLog ('OneDrive 保留在此裝置設定失敗：' + $_.ToString()) }
+    }
     if ($script:dotOn) {
         try { Set-DotButton $true $false } catch { $null = Write-ErrorLog ('浮動按鈕錯誤：' + $_.ToString()) }
     }
