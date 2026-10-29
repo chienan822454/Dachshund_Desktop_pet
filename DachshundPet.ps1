@@ -191,7 +191,7 @@ if (-not [string]::IsNullOrEmpty($UpdateMode)) {
     }
     exit 0
 }
-$script:appVersion = 'V1.30.1'
+$script:appVersion = 'V1.31.0'
 $script:appTitle = '臘腸狗桌寵 ' + $script:appVersion + '（旺旺）'
 try { $Host.UI.RawUI.WindowTitle = '旺旺（臘腸狗桌寵）- 關閉這個視窗會結束旺旺' } catch { }
 Add-Type -AssemblyName System.Windows.Forms
@@ -2593,6 +2593,7 @@ function Set-FlyMode([bool]$on) {
             try { $script:miGravity.Checked = $false } catch { }
         }
         if ($script:dogSleeping) { Stop-DogSleep $false }
+        if ($script:jerkyState -eq 'hold') { Stop-JerkyHold }
         $script:begging = $false
         $script:flyMode = $true
         Start-PlaneFlight 'cruise' '起飛囉！旺旺開飛機～'
@@ -5460,42 +5461,82 @@ function Hide-Jerky {
     } catch { }
 }
 
+function Get-JerkyHandCursor {
+    # The mouse pointer becomes a hand holding the jerky; the fingertips (middle of hand_jerky.png) are the hot spot.
+    if ($null -ne $script:jerkyHandCursor) { return $script:jerkyHandCursor }
+    $script:jerkyHandCursor = [System.Windows.Forms.Cursors]::Hand
+    $png = Join-Path $PSScriptRoot 'hand_jerky.png'
+    if (-not (Test-Path -LiteralPath $png)) { return $script:jerkyHandCursor }
+    $src = $null
+    $bmp = $null
+    try {
+        $src = [System.Drawing.Image]::FromFile($png)
+        $side = Get-Scaled 96
+        $bmp = [System.Drawing.Bitmap]::new($side, $side, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+        $g = [System.Drawing.Graphics]::FromImage($bmp)
+        try {
+            $g.Clear([System.Drawing.Color]::Transparent)
+            $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+            $g.DrawImage($src, [System.Drawing.Rectangle]::new(0, 0, $side, $side))
+        } finally {
+            $g.Dispose()
+        }
+        $script:jerkyHandCursor = [System.Windows.Forms.Cursor]::new($bmp.GetHicon())
+    } catch {
+        $script:jerkyHandCursor = [System.Windows.Forms.Cursors]::Hand
+        $null = Write-ErrorLog ('肉乾游標無法使用：' + $_.ToString())
+    } finally {
+        if ($null -ne $bmp) { $bmp.Dispose() }
+        if ($null -ne $src) { $src.Dispose() }
+    }
+    return $script:jerkyHandCursor
+}
+
 function Start-JerkyThrow {
+    # 丟肉乾: the pointer picks up a jerky. 旺旺 chases it; catching the pointer = it snatches the jerky and eats it
+    # a little way off. A click throws it the way the pointer is moving (a still pointer just lets it drop).
     if (Request-PlaneLandFirst @{ Kind = 'jerky' }) { return }
     if (-not (Test-DogAction 'jerky')) { Set-Bubble '這件衣服還沒有吃肉乾的圖片，換別件或脫掉衣服再試試～'; return }
     if (-not (Test-Path -LiteralPath $script:jerkyPath)) { Set-Bubble '找不到肉乾的圖片（jerky.png）'; return }
-    if ($script:dogAct -eq 'jerky') { Set-Bubble '我還在吃上一片～等一下！'; return }
+    if ($script:dogAct -eq 'jerky' -or $script:dogAct -eq 'snatch') { Set-Bubble '我還在吃上一片～等一下！'; return }
     if ($script:dogAct -eq 'burst') { return }
+    if ($script:jerkyState -eq 'hold') { Set-Bubble '肉乾已經在你手上了～點一下丟出去！'; return }
+    if ($script:jerkyState -ne '') { Hide-Jerky }
     Initialize-JerkyWindow
+    Stop-CleanMode
     if ($script:dogSleeping) { Stop-DogSleep $false }
     if ($script:alarmRinging) { Stop-AlarmRing '' }
     $script:jerkyFlip = ($script:rng.Next(0, 2) -eq 0)
-    $bmp = Get-JerkyBitmap
-    $jw = [double]$bmp.Width
-    $jh = [double]$bmp.Height
-    $cur = [System.Windows.Forms.Cursor]::Position
-    $wa = [System.Windows.Forms.Screen]::FromPoint($cur).WorkingArea
-    $script:jerkyArea = $wa
-    $script:jerkyX = [double]$cur.X - $jw / 2
-    $script:jerkyY = [double]$cur.Y - $jh / 2
-    # Thrown away from 旺旺, a little up and then down.
-    $dogCx = [double]$script:baseLocation.X + $script:form.Width / 2.0
-    $dir = if ([double]$cur.X -ge $dogCx) { 1.0 } else { -1.0 }
-    $spd = [double]$script:dpiScale
-    $script:jerkyVX = $dir * ($script:rng.Next(70, 140) / 10.0) * $spd
-    $script:jerkyVY = -($script:rng.Next(100, 170) / 10.0) * $spd
-    # Where it lands: in gravity mode on the taskbar, otherwise at the height of 旺旺's paws
-    # (or lower when it is thrown from further down), always on the screen.
-    $floor = [double]$wa.Bottom - $jh
-    if (-not $script:gravityMode) {
-        $feet = [double]$script:baseLocation.Y + $script:form.Height * 674.0 / 768.0 - $jh
-        $floor = [Math]::Min($floor, [Math]::Max($feet, [double]$cur.Y + $jh))
-    }
-    $script:jerkyFloor = $floor
-    $script:jerkyState = 'fly'
+    $vs = [System.Windows.Forms.SystemInformation]::VirtualScreen
+    $hf = New-Object System.Windows.Forms.Form
+    $hf.Text = '旺旺的肉乾在你手上'
+    $hf.FormBorderStyle = 'None'
+    $hf.StartPosition = 'Manual'
+    $hf.ShowInTaskbar = $false
+    $hf.TopMost = $true
+    $hf.KeyPreview = $true
+    $hf.BackColor = [System.Drawing.Color]::Black
+    $hf.Opacity = 0.01
+    $hf.Bounds = $vs
+    $hf.Cursor = Get-JerkyHandCursor
+    $hf.Add_MouseDown({
+        param($sender, $e)
+        try {
+            if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Right) { Stop-JerkyHold; Hide-Jerky; if ($script:dogAct -eq 'fetch') { $script:dogAct = '' }; Set-Bubble '好～肉乾先收起來'; return }
+            if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) { Invoke-JerkyThrowFromHand }
+        } catch { $null = Write-ErrorLog ('丟肉乾錯誤：' + $_.ToString()); Stop-JerkyHold; Hide-Jerky }
+    })
+    $hf.Add_KeyDown({
+        param($sender, $e)
+        if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Escape) { Stop-JerkyHold; Hide-Jerky; if ($script:dogAct -eq 'fetch') { $script:dogAct = '' }; Set-Bubble '好～肉乾先收起來' }
+    })
+    $script:jerkyHoldForm = $hf
+    $script:jerkyTrail.Clear()
+    $script:jerkyState = 'hold'
     $script:jerkyTicks = 0
-    Show-JerkyWindow
-    # 旺旺 watches it fly (also stops roaming, begging and other small actions).
+    $hf.Show()
+    $hf.Activate()
+    # 旺旺 has seen the jerky in your hand.
     $script:begging = $false
     $script:circleChaseUntil = 0
     $script:roamTarget = $null
@@ -5509,13 +5550,109 @@ function Start-JerkyThrow {
     $script:dogActLen = 0
     $script:fetchMoving = $false
     $script:lastInteractTick = $script:clockTick
-    $lines = @('哇！肉乾！', '是肉乾！汪汪！', '肉乾！肉乾！')
-    Set-Bubble ([string]$lines[$script:rng.Next(0, $lines.Count)])
+    Set-Bubble '肉乾！肉乾！（點一下丟出去，被我追到就搶走囉～右鍵或 Esc 收起來）'
+}
+
+function Stop-JerkyHold {
+    # The pointer goes back to normal (the see-through cover is closed).
+    $hf = $script:jerkyHoldForm
+    $script:jerkyHoldForm = $null
+    if ($script:jerkyState -eq 'hold') { $script:jerkyState = '' }
+    if ($null -ne $hf) { try { $hf.Close(); $hf.Dispose() } catch { } }
+}
+
+function Invoke-JerkyThrowFromHand {
+    # Let go: flies off the way the pointer was moving (in an arc, gravity pulls it down); a still pointer drops it.
+    $cur = [System.Windows.Forms.Cursor]::Position
+    $now = [Environment]::TickCount
+    $vx = 0.0
+    $vy = 0.0
+    foreach ($tr in $script:jerkyTrail) {
+        $age = $now - [int]$tr[0]
+        if ($age -ge 30 -and $age -le 180) {
+            $vx = ([double]$cur.X - [double]$tr[1]) / $age * 60.0
+            $vy = ([double]$cur.Y - [double]$tr[2]) / $age * 60.0
+            break
+        }
+    }
+    $dpi = [double]$script:dpiScale
+    $vx = $vx * 0.55
+    $vy = $vy * 0.55
+    $sp = [Math]::Sqrt($vx * $vx + $vy * $vy)
+    $max = 26.0 * $dpi
+    if ($sp -gt $max) { $vx = $vx * $max / $sp; $vy = $vy * $max / $sp; $sp = $max }
+    $dropped = ($sp -lt (2.5 * $dpi))
+    if ($dropped) { $vx = 0.0; $vy = 0.0 }
+    Stop-JerkyHold
+    $bmp = Get-JerkyBitmap
+    $jw = [double]$bmp.Width
+    $jh = [double]$bmp.Height
+    $wa = [System.Windows.Forms.Screen]::FromPoint($cur).WorkingArea
+    $script:jerkyArea = $wa
+    # The jerky hangs below and to the left of the fingertips.
+    $script:jerkyX = [double]$cur.X - $jw * 0.75
+    $script:jerkyY = [double]$cur.Y + $jh * 0.2
+    $script:jerkyVX = $vx
+    $script:jerkyVY = $vy
+    $floor = [double]$wa.Bottom - $jh
+    if (-not $script:gravityMode) {
+        $feet = [double]$script:baseLocation.Y + $script:form.Height * 674.0 / 768.0 - $jh
+        $floor = [Math]::Min($floor, [Math]::Max($feet, [double]$cur.Y + $jh))
+    }
+    $script:jerkyFloor = $floor
+    $script:jerkyState = 'fly'
+    $script:jerkyTicks = 0
+    Show-JerkyWindow
+    if ($script:dogAct -ne 'fetch') {
+        $script:dogAct = 'fetch'
+        $script:dogActTick = 0
+        $script:dogActLen = 0
+    }
+    $script:fetchMoving = $false
+    if ($dropped) { Set-Bubble '掉下來了！我來了～' } else { Set-Bubble ([string](@('哇！飛出去了！', '咻～我去撿！', '接住！汪！')[$script:rng.Next(0, 3)])) }
+}
+
+function Start-JerkySnatch {
+    # Caught the pointer: grabs the jerky out of your hand and runs off a little way to eat it.
+    Stop-JerkyHold
+    Hide-Jerky
+    $cur = [System.Windows.Forms.Cursor]::Position
+    $w = [double]$script:form.Width
+    $away = if ([double]$cur.X -ge ($script:baseLocation.X + $w / 2.0)) { -1.0 } else { 1.0 }
+    $b = if ($script:gravityMode) { Get-GroundBounds } else { Get-RoamBounds }
+    $tx = [double]$script:baseLocation.X + $away * $w * 1.1
+    if ($tx -lt [double]$b[0] -or $tx -gt [double]$b[1]) { $away = -$away; $tx = [double]$script:baseLocation.X + $away * $w * 1.1 }
+    $script:snatchTarget = [Math]::Min([double]$b[1], [Math]::Max([double]$b[0], $tx))
+    $script:facingLeft = ($away -lt 0)
+    $script:dogAct = 'snatch'
+    $script:dogActTick = 0
+    $script:dogActLen = 0
+    $script:fetchMoving = $false
+    Set-Bubble ([string](@('搶到了！嘿嘿～', '我的！汪！', '抓到肉乾了！')[$script:rng.Next(0, 3)]))
 }
 
 function Update-Jerky([bool]$menuOpen) {
     if ($script:jerkyState -eq '') { return }
     $script:jerkyTicks++
+    if ($script:jerkyState -eq 'hold') {
+        # The pointer holds the jerky: remember where it was (for the throw); 旺旺 keeps chasing it.
+        $cur = [System.Windows.Forms.Cursor]::Position
+        [void]$script:jerkyTrail.Insert(0, @([Environment]::TickCount, $cur.X, $cur.Y))
+        while ($script:jerkyTrail.Count -gt 10) { $script:jerkyTrail.RemoveAt($script:jerkyTrail.Count - 1) }
+        if ($null -eq $script:jerkyHoldForm) { $script:jerkyState = ''; return }
+        if ($script:dogAct -eq '' -and $script:actionMode -eq 'idle' -and -not $script:isDragging -and -not $script:dogSleeping) {
+            $script:dogAct = 'fetch'
+            $script:dogActTick = 0
+            $script:dogActLen = 0
+        }
+        if ($script:jerkyTicks -gt 1500) {
+            # About a minute and a half without throwing: put away.
+            Stop-JerkyHold
+            if ($script:dogAct -eq 'fetch') { $script:dogAct = '' }
+            Set-Bubble '手痠了吧？肉乾先收起來～'
+        }
+        return
+    }
     $wa = $script:jerkyArea
     if ($script:jerkyState -eq 'fly') {
         # Flies, falls, bounces once and slides to a stop.
@@ -5939,6 +6076,11 @@ function Get-DogFramePath {
             if ($script:dogHappyFrames.Count -eq 3) { return $script:dogHappyFrames[$teaseWag[$t % 4]] }
             return $null
         }
+        'snatch' {
+            # Runs off with the jerky in its mouth.
+            if ($script:dogPoses.ContainsKey('jerky_01')) { return $script:dogPoses['jerky_01'] }
+            return $null
+        }
         'fetch' {
             # Watching the jerky fly (standing, tail wagging), then running over to it.
             if ($script:fetchMoving) {
@@ -6100,6 +6242,10 @@ try {
     $script:miGravity = $null
     $script:miFly = $null
     $script:flySpeed = 1.0            # 飛行速度: 0.6 slow / 1.0 normal / 1.6 fast
+    $script:jerkyHoldForm = $null     # 丟肉乾: the see-through cover while the pointer holds the jerky
+    $script:jerkyHandCursor = $null
+    $script:jerkyTrail = New-Object System.Collections.ArrayList
+    $script:snatchTarget = 0.0
     $script:miFlySpeed = @()
     $script:planeTrickTick = 0.0
     $script:planeTime = 0.0           # flight time in 60 ms steps (also counts halves while flying at 30 ms)
@@ -7276,7 +7422,7 @@ try {
             try { Stop-DogSleep $true } catch { }
             return
         }
-        if ($script:dogAct -eq 'jerky' -or $script:dogAct -eq 'fetch') {
+        if ($script:dogAct -eq 'jerky' -or $script:dogAct -eq 'fetch' -or $script:dogAct -eq 'snatch') {
             # Going for the jerky or eating it: a click does not stop it.
             if ($script:dogAct -eq 'jerky') { Set-Bubble '吃肉乾中～等我吃完！' } else { Set-Bubble '等等～我要去吃肉乾！' }
             return
@@ -7541,11 +7687,67 @@ try {
                             Set-Bubble ([string]$yum[$script:rng.Next(0, $yum.Count)])
                         }
                     }
+                    'snatch' {
+                        $xOffset = 0
+                        $yOffset = 0
+                        if ($t -gt 6 -and -not $script:isDragging) {
+                            $sdx = $script:snatchTarget - [double]$script:baseLocation.X
+                            $sstep = [Math]::Max($script:roamSpeed, 5.0) * 1.3 * $script:dpiScale * $script:sizeRatio
+                            if ([Math]::Abs($sdx) -le $sstep -or $t -gt 90) {
+                                Start-DogAction 'jerky' '找個地方慢慢吃～'
+                                $script:roamPauseTicks = 60
+                                $t = 0
+                            } else {
+                                $script:baseLocation = [System.Drawing.Point]::new([int][Math]::Round($script:baseLocation.X + [Math]::Sign($sdx) * $sstep), $script:baseLocation.Y)
+                                $yOffset = @(0, -6, -9, -4)[[int]($script:idleTick % 4)]
+                            }
+                        }
+                    }
                     'fetch' {
                         $xOffset = 0
                         $yOffset = 0
                         $script:fetchMoving = $false
-                        if ($script:jerkyState -eq 'fly') {
+                        if ($script:jerkyState -eq 'hold') {
+                            # The jerky is in your hand: runs after the pointer, and grabs it when it gets there.
+                            if (-not $script:isDragging) {
+                                $cur = [System.Windows.Forms.Cursor]::Position
+                                $fw = [double]$script:form.Width
+                                $fh = [double]$script:form.Height
+                                $jx = [double]$cur.X - (Get-Scaled 14)
+                                $jy = [double]$cur.Y + (Get-Scaled 18)
+                                $wantLeft = ($jx -lt ($script:baseLocation.X + $fw / 2.0))
+                                $mouthX = if ($wantLeft) { 0.14 * $fw } else { 0.86 * $fw }
+                                $mouthY = 0.34 * $fh
+                                $tx = $jx - $mouthX
+                                $ty = $jy - $mouthY
+                                if ($script:gravityMode) {
+                                    $gb = Get-GroundBounds
+                                    $ty = [double]$gb[3]
+                                    $tx = [Math]::Min([double]$gb[1], [Math]::Max([double]$gb[0], $tx))
+                                } else {
+                                    $rb = Get-RoamBounds
+                                    $tx = [Math]::Min([double]$rb[1], [Math]::Max([double]$rb[0], $tx))
+                                    $ty = [Math]::Min([double]$rb[3], [Math]::Max([double]$rb[2], $ty))
+                                }
+                                $fdx = $tx - $script:baseLocation.X
+                                $fdy = $ty - $script:baseLocation.Y
+                                $fdist = [Math]::Sqrt($fdx * $fdx + $fdy * $fdy)
+                                $fstep = [Math]::Max($script:roamSpeed, 5.0) * 1.2 * $script:dpiScale * $script:sizeRatio
+                                if ($fdist -gt 2) {
+                                    if ([Math]::Abs($fdx) -gt 4) { $script:facingLeft = $wantLeft }
+                                    $k = [Math]::Min(1.0, $fstep / $fdist)
+                                    $script:baseLocation = [System.Drawing.Point]::new([int][Math]::Round($script:baseLocation.X + $fdx * $k), [int][Math]::Round($script:baseLocation.Y + $fdy * $k))
+                                    $script:fetchMoving = ($fdist -gt $fstep)
+                                    if ($script:fetchMoving) { if (Test-RunFrames) { $yOffset = @(0, -7, -12, -5)[[int]($script:idleTick % 4)] } else { $yOffset = @(-6, 0, -6, -6, 0, -6)[$script:clockTick % 6] } }
+                                }
+                                $mx = [double]$script:baseLocation.X + $mouthX - $jx
+                                $my = [double]$script:baseLocation.Y + $mouthY - $jy
+                                if ([Math]::Sqrt($mx * $mx + $my * $my) -lt ($fw * 0.13) -and $t -gt 15) {
+                                    Start-JerkySnatch
+                                    $t = 0
+                                }
+                            }
+                        } elseif ($script:jerkyState -eq 'fly') {
                             # Watching the jerky fly.
                             $jcx = $script:jerkyX + 20.0
                             $script:facingLeft = ($jcx -lt ($script:baseLocation.X + $script:form.Width / 2.0))
@@ -7809,7 +8011,7 @@ try {
             }
             if ($script:hovering -and -not $script:isDragging -and -not $menuOpen) {
                 $script:hoverTicks++
-                $petOk = (-not $script:dogSleeping -and $script:dogAct -ne 'eat' -and $script:dogAct -ne 'drink' -and $script:dogAct -ne 'fling' -and $script:dogAct -ne 'tease' -and $script:dogAct -ne 'fetch' -and $script:dogAct -ne 'jerky' -and $script:dogAct -ne 'burst' -and $script:dogAct -ne 'plane' -and -not $script:alarmRinging)
+                $petOk = (-not $script:dogSleeping -and $script:dogAct -ne 'eat' -and $script:dogAct -ne 'drink' -and $script:dogAct -ne 'fling' -and $script:dogAct -ne 'tease' -and $script:dogAct -ne 'fetch' -and $script:dogAct -ne 'jerky' -and $script:dogAct -ne 'snatch' -and $script:dogAct -ne 'burst' -and $script:dogAct -ne 'plane' -and -not $script:alarmRinging)
                 if ($petOk -and $script:headPatEnabled -and $script:hoverTicks -ge 14 -and $script:dogAct -ne 'headpat' -and $script:dogAct -ne 'pet' -and $script:actionMode -eq 'idle' -and (Test-PointerOnHead)) {
                     Start-DogAction 'headpat' '*'
                 } elseif ($script:hoverTicks -eq 25 -and $petOk -and $script:dogAct -ne 'headpat') { Start-DogAction 'pet' '*' }
@@ -7991,6 +8193,7 @@ try {
         try { if ($null -ne $script:glassPlayer) { $script:glassPlayer.Dispose() } } catch { }
         try { Stop-SirenLoop; if ($null -ne $script:sirenLoopPlayer) { $script:sirenLoopPlayer.Dispose() } } catch { }
         try { Stop-CleanMode } catch { }
+        try { Stop-JerkyHold } catch { }
         try { if ($null -ne $script:bannerForm) { $script:bannerForm.Close(); $script:bannerForm.Dispose() } } catch { }
         try { foreach ($pp in @($script:poops)) { Remove-DogPoop $pp } } catch { }
         try { foreach ($sp in @($script:dogSoundPlayers.Values)) { if ($null -ne $sp) { $sp.Dispose() } } } catch { }
