@@ -191,7 +191,7 @@ if (-not [string]::IsNullOrEmpty($UpdateMode)) {
     }
     exit 0
 }
-$script:appVersion = 'V1.27.1'
+$script:appVersion = 'V1.28.0'
 $script:appTitle = '臘腸狗桌寵 ' + $script:appVersion + '（旺旺）'
 try { $Host.UI.RawUI.WindowTitle = '旺旺（臘腸狗桌寵）- 關閉這個視窗會結束旺旺' } catch { }
 Add-Type -AssemblyName System.Windows.Forms
@@ -798,6 +798,7 @@ function Stop-SirenLoop {
     if ($script:sirenLooping -and $script:clockTick -ge $script:sirenHoldTick) {
         $lp = $script:sirenLoopPlayer
         if ($script:loopKey -eq 'snore' -and $script:dogSoundPlayers.ContainsKey('snore_loop')) { $lp = $script:dogSoundPlayers['snore_loop'] }
+        if ($script:loopKey -eq 'prop' -and $script:dogSoundPlayers.ContainsKey('prop_loop')) { $lp = $script:dogSoundPlayers['prop_loop'] }
         if ($null -ne $lp) { try { $lp.Stop() } catch { } }
     }
     $script:loopKey = ''
@@ -813,15 +814,17 @@ function Update-SirenLoop([bool]$running) {
     $want = ($running -and $script:sirenEnabled -and $script:outfitLights.Count -gt 0 -and -not $script:dogHidden)
     $snore = ($script:dogSounds -and $script:dogSleeping -and $script:dogAct -eq 'sleep' -and $script:dogActTick -ge ($script:dogSleepPre + 25) -and
         $script:bellyRubTicks -le 0 -and -not $script:dogHidden -and -not $script:alarmRinging)
-    if ($want -or $snore) {
+    $prop = ($script:planeSoundEnabled -and $script:dogAct -eq 'plane' -and $script:planePhase -ne 'stop' -and -not $script:dogHidden)
+    if ($want -or $prop -or $snore) {
         $key = 'snore'
+        if ($prop) { $key = 'prop' }
         if ($want) { $key = 'siren'; $script:sirenIdleTicks = 0 }
         if ($script:sirenLooping -and $script:loopKey -ne $key) { Stop-SirenLoop }
         if (-not $script:sirenLooping -or ($script:sirenResumeTick -gt 0 -and $script:clockTick -ge $script:sirenResumeTick)) {
             $script:sirenResumeTick = 0
             if ($script:clockTick -lt $script:sirenHoldTick) { return }
             $lp = $null
-            if ($key -eq 'siren') { $lp = Get-SirenLoopPlayer } else { $lp = Get-DogSoundPlayer 'snore_loop' }
+            if ($key -eq 'siren') { $lp = Get-SirenLoopPlayer } elseif ($key -eq 'prop') { $lp = Get-DogSoundPlayer 'prop_loop' } else { $lp = Get-DogSoundPlayer 'snore_loop' }
             if ($null -eq $lp) { return }
             try {
                 $lp.PlayLooping()
@@ -833,7 +836,7 @@ function Update-SirenLoop([bool]$running) {
         }
         return
     }
-    if ($script:sirenLooping -and $script:loopKey -eq 'snore') { Stop-SirenLoop; return }
+    if ($script:sirenLooping -and ($script:loopKey -eq 'snore' -or $script:loopKey -eq 'prop')) { Stop-SirenLoop; return }
     if (-not $script:sirenLooping) { return }
     $script:sirenIdleTicks++
     if ($script:sirenIdleTicks -ge 8 -or -not $script:sirenEnabled -or $script:outfitLights.Count -eq 0 -or $script:dogHidden) { Stop-SirenLoop }
@@ -1866,6 +1869,20 @@ function Import-DogPictures {
         if ([string]::IsNullOrEmpty($script:outfitDir)) { $jp = Join-Path $PSScriptRoot $jf } else { $jp = Join-Path $script:outfitDir $jf }
         if (Test-Path -LiteralPath $jp) { $script:dogPoses['jeat_' + $jn] = $jp } else { $script:jeatReady = $false }
     }
+    # Flying the plane (飛行員汪汪): plane_d/l/u<0-3> = nose down / level / nose up with the propeller turning,
+    # plane_s<0-3> = rolling on the ground with the propeller turning, plane_st = standing still in the plane.
+    # Only the outfit's own pictures; all 17 are needed.
+    $script:planeReady = $false
+    if (-not [string]::IsNullOrEmpty($script:outfitDir)) {
+        $planeNames = @('plane_st')
+        foreach ($pt in @('d', 'l', 'u', 's')) { foreach ($pk in 0..3) { $planeNames += ('plane_' + $pt + $pk) } }
+        $planeCount = 0
+        foreach ($pn in $planeNames) {
+            $pp = Join-Path $script:outfitDir ('dachshund_3d_' + $pn + '.png')
+            if (Test-Path -LiteralPath $pp) { $script:dogPoses[$pn] = $pp; $planeCount++ }
+        }
+        $script:planeReady = ($planeCount -eq $planeNames.Count)
+    }
     # Flashing lights (the patrol car's light bar): clothes\<id>\lights.txt = one line per picture: pose x y w h.
     $script:outfitLights = @{}
     if (-not [string]::IsNullOrEmpty($script:outfitDir)) {
@@ -1990,6 +2007,13 @@ function Set-DogOutfit([string]$id) {
     if (-not [string]::IsNullOrEmpty([string]$info[2])) { $script:outfitDir = Join-Path $PSScriptRoot ([string]$info[2]) }
     $script:outfitId = $id
     Import-DogPictures
+    if (-not $script:planeReady -and ($script:flyMode -or $script:dogAct -eq 'plane')) {
+        # Another outfit has no plane: lands right here.
+        $script:flyMode = $false
+        try { $script:miFly.Checked = $false } catch { }
+        if ($script:dogAct -eq 'plane') { $script:dogAct = '' }
+        $script:planePhase = ''
+    }
     Reset-ImageCache $script:displaySize
     Update-WarmList
     # Show the new clothes right away, in whatever pose the dachshund is in now.
@@ -2007,6 +2031,203 @@ function Set-DogOutfit([string]$id) {
 # -----------------------------------------------------------------------------
 # Pet behaviour
 # -----------------------------------------------------------------------------
+function Get-PlaneUnit {
+    return [Math]::Max(0.3, [double]$script:dpiScale * [double]$script:sizeRatio)
+}
+
+function Get-PlaneFramePath {
+    # Propeller: 4 pictures round and round. Nose down while coming down, up while climbing or just before touching down.
+    $k = [int]($script:clockTick % 4)
+    $u = Get-PlaneUnit
+    switch ($script:planePhase) {
+        'stop' { return $script:dogPoses['plane_st'] }
+        'taxi' { return $script:dogPoses['plane_s' + $k] }
+        'flare' { return $script:dogPoses['plane_u' + $k] }
+    }
+    $tag = 'l'
+    if ($script:planeVY -gt (1.2 * $u)) { $tag = 'd' } elseif ($script:planeVY -lt (-1.2 * $u)) { $tag = 'u' }
+    return $script:dogPoses['plane_' + $tag + $k]
+}
+
+function Start-PlaneFlight([string]$phase, [string]$say) {
+    # glide = gravity mode, thrown up: comes down slowly to the taskbar. cruise = 飛行模式: flies about all over.
+    if (-not $script:planeReady) { return }
+    $u = Get-PlaneUnit
+    $dir = 1.0
+    if ($script:facingLeft) { $dir = -1.0 }
+    if ($phase -eq 'glide') {
+        if ([Math]::Abs($script:flingVX) -gt 1.0) { $dir = [Math]::Sign($script:flingVX) }
+        $script:planeVX = $dir * [Math]::Max([Math]::Min([Math]::Abs($script:flingVX), 9.0 * $u), 4.0 * $u)
+        $script:planeVY = 0.5 * $u
+    } elseif ($script:dogAct -ne 'plane') {
+        $script:planeVX = $dir * 4.0 * $u
+        $script:planeVY = -1.5 * $u
+    }
+    $script:planePhase = $phase
+    $script:planeTarget = $null
+    $script:dogAct = 'plane'
+    $script:dogActTick = 0
+    $script:dogActLen = 0
+    $script:dogSleeping = $false
+    $script:dogNightSleep = $false
+    $script:actionMode = 'idle'
+    $script:actionTick = 0
+    $script:roamMoving = $false
+    $script:roamTarget = $null
+    $script:fallFrameOn = $false
+    Stop-PoopWalk
+    if (-not [string]::IsNullOrEmpty($say)) { Set-Bubble $say }
+}
+
+function Start-PlaneLanding {
+    # 飛行模式 switched off (not in gravity mode): glides down to a spot in the lower part of the screen and lands there.
+    if ($script:dogAct -ne 'plane') { return }
+    $b = Get-RoamBounds
+    $y = [double]$script:baseLocation.Y
+    $land = [double]$b[2] + ([double]$b[3] - [double]$b[2]) * (0.6 + $script:rng.NextDouble() * 0.35)
+    $land = [Math]::Min([double]$b[3], [Math]::Max($land, $y + $script:form.Height * 0.3))
+    $script:planeLandY = $land
+    $script:planePhase = 'land'
+    Set-Bubble '準備降落～'
+}
+
+function Stop-PlaneFlight {
+    # Landed and stood still for 3 seconds: the plane is put away, back in the 飛行員汪汪 outfit.
+    $script:planePhase = ''
+    $script:dogAct = ''
+    $script:actionMode = 'happy'
+    $script:actionTick = 0
+    $script:roamPauseTicks = 60
+    $script:lastInteractTick = $script:clockTick
+    Set-Bubble '飛機停好了～旺旺回來囉！'
+}
+
+function Update-PlaneFlight {
+    if ($script:isDragging) { return }
+    $u = Get-PlaneUnit
+    $x = [double]$script:baseLocation.X
+    $y = [double]$script:baseLocation.Y
+    $h = [double]$script:form.Height
+    switch ($script:planePhase) {
+        { $_ -eq 'glide' -or $_ -eq 'land' -or $_ -eq 'flare' } {
+            if ($script:planePhase -eq 'land') {
+                $b = Get-RoamBounds
+                $ground = $script:planeLandY
+                $left = [double]$b[0]; $right = [double]$b[1]; $top = [double]$b[2]
+            } else {
+                $gb = Get-GroundBounds
+                $ground = [double]$gb[3]
+                $left = [double]$gb[0]; $right = [double]$gb[1]; $top = [double]$gb[2]
+            }
+            $dir = [Math]::Sign($script:planeVX)
+            if ($dir -eq 0) { $dir = 1 }
+            if ($script:planePhase -eq 'flare') {
+                # Nose up just before touching down: comes down gently, slows a little.
+                $script:planeVY += (0.8 * $u - $script:planeVY) * 0.2
+                $script:planeVX = $script:planeVX * 0.985
+            } else {
+                # Gliding: forward at an easy speed, slowly down, a gentle bob.
+                $script:planeVY += ((2.0 + 0.6 * [Math]::Sin($script:dogActTick / 9.0)) * $u - $script:planeVY) * 0.08
+                $script:planeVX += ($dir * 5.0 * $u - $script:planeVX) * 0.04
+                if (($ground - $y) -lt ($h * 0.16)) { $script:planePhase = 'flare' }
+            }
+            $nx = $x + $script:planeVX
+            $ny = $y + $script:planeVY
+            if ($nx -lt $left) { $nx = $left; $script:planeVX = [Math]::Abs($script:planeVX) }
+            if ($nx -gt $right) { $nx = $right; $script:planeVX = -[Math]::Abs($script:planeVX) }
+            if ($ny -lt $top) { $ny = $top }
+            if ($ny -ge $ground) {
+                $ny = $ground
+                $script:planeVY = 0.0
+                $script:planePhase = 'taxi'
+                Set-Bubble '著陸！'
+            }
+            $x = $nx; $y = $ny
+        }
+        'taxi' {
+            # Rolling on the wheels, slowing down to a stop.
+            $script:planeVX = $script:planeVX * 0.9
+            $b = if ($script:gravityMode) { Get-GroundBounds } else { Get-RoamBounds }
+            $x = [Math]::Min([double]$b[1], [Math]::Max([double]$b[0], $x + $script:planeVX))
+            if ([Math]::Abs($script:planeVX) -lt (0.4 * $u)) {
+                $script:planePhase = 'stop'
+                $script:planeStopTick = $script:clockTick + 50
+                Set-Bubble '降落成功！'
+            }
+        }
+        'stop' {
+            if ($script:clockTick -ge $script:planeStopTick) { Stop-PlaneFlight; return }
+        }
+        'cruise' {
+            # 飛行模式: flies to one spot after another anywhere on the screen (to the mouse pointer when called).
+            $b = Get-RoamBounds
+            $called = ($script:clockTick -lt $script:summonRunUntil)
+            if ($called) {
+                $cur = [System.Windows.Forms.Cursor]::Position
+                $script:planeTarget = [System.Drawing.PointF]::new([float]($cur.X - $script:form.Width / 2), [float]($cur.Y - $h * 0.55))
+            } elseif ($null -eq $script:planeTarget) {
+                for ($try = 0; $try -lt 8; $try++) {
+                    $tx = $script:rng.Next([int]$b[0], [int]$b[1] + 1)
+                    $ty = $script:rng.Next([int]$b[2], [int]$b[3] + 1)
+                    if ((([Math]::Abs($tx - $x)) + ([Math]::Abs($ty - $y))) -gt ($script:form.Width * 1.5)) { break }
+                }
+                $script:planeTarget = [System.Drawing.PointF]::new([float]$tx, [float]$ty)
+            }
+            $dx = [double]$script:planeTarget.X - $x
+            $dy = [double]$script:planeTarget.Y - $y
+            $d = [Math]::Sqrt($dx * $dx + $dy * $dy)
+            $speed = 6.0 * $u
+            if ($called) { $speed = 9.0 * $u }
+            if ($d -gt 1) {
+                $script:planeVX += ($dx / $d * $speed - $script:planeVX) * 0.05
+                $script:planeVY += ($dy / $d * $speed * 0.7 - $script:planeVY) * 0.05
+            }
+            $x = [Math]::Min([double]$b[1], [Math]::Max([double]$b[0], $x + $script:planeVX))
+            $y = [Math]::Min([double]$b[3], [Math]::Max([double]$b[2], $y + $script:planeVY + 0.6 * [Math]::Sin($script:dogActTick / 8.0)))
+            if ($d -lt (40.0 * $u)) {
+                $script:planeTarget = $null
+                if ($called) {
+                    $script:summonRunUntil = 0
+                    Set-Bubble '飛過來了！汪！'
+                } elseif ($script:rng.Next(0, 4) -eq 0) {
+                    $flyLines = @('咻～～', '飛高高！', '旺旺機長報到！', '噗噗噗～')
+                    Set-Bubble ([string]$flyLines[$script:rng.Next(0, $flyLines.Count)])
+                }
+            }
+        }
+        default { $script:dogAct = ''; return }
+    }
+    if ([Math]::Abs($script:planeVX) -gt (0.3 * $u)) { $script:facingLeft = ($script:planeVX -lt 0) }
+    $script:baseLocation = [System.Drawing.Point]::new([int][Math]::Round($x), [int][Math]::Round($y))
+}
+
+function Set-FlyMode([bool]$on) {
+    if ($on) {
+        if (-not $script:planeReady) {
+            # Only 飛行員汪汪 has the plane: puts it on first.
+            Set-DogOutfit 'pilot'
+            if (-not $script:planeReady) {
+                $script:flyMode = $false
+                try { $script:miFly.Checked = $false } catch { }
+                Set-Bubble '找不到開飛機的圖片'
+                return
+            }
+        }
+        if ($script:gravityMode) {
+            $script:gravityMode = $false
+            try { $script:miGravity.Checked = $false } catch { }
+        }
+        if ($script:dogSleeping) { Stop-DogSleep $false }
+        $script:begging = $false
+        $script:flyMode = $true
+        Start-PlaneFlight 'cruise' '起飛囉！旺旺開飛機～'
+    } else {
+        $script:flyMode = $false
+        if ($script:dogAct -eq 'plane' -and $script:planePhase -eq 'cruise') { Start-PlaneLanding }
+    }
+    try { $script:miFly.Checked = $script:flyMode } catch { }
+}
+
 function Test-RunFrames {
     # Running: legs gathered under the body (run_00) and stretched out in a leap (run_01).
     return ($script:dogPoses.ContainsKey('run_00') -and $script:dogPoses.ContainsKey('run_01'))
@@ -4627,6 +4848,11 @@ function Set-PlaySetting([string]$name, [bool]$on) {
             if (-not $on -and $script:loopKey -eq 'snore') { Stop-SirenLoop }
             if ($on) { Set-Bubble '旺旺吃東西、喝水、打呼會有小小的聲音～' } else { Set-Bubble '好，旺旺安安靜靜的' }
         }
+        'propsnd' {
+            $script:planeSoundEnabled = $on
+            if (-not $on -and $script:loopKey -eq 'prop') { Stop-SirenLoop }
+            if ($on) { Set-Bubble '開飛機時噗噗噗～' } else { Set-Bubble '好，飛機安安靜靜地飛' }
+        }
         'daily' {
             $script:dailyEnabled = $on
             if ($on) { Set-Bubble '早上、中午、下班時間我會來找你！' } else { Set-Bubble '好，不管時間了' }
@@ -5155,7 +5381,8 @@ function Get-DogFramePath {
     # Picture for the dachshund this tick, or $null for the normal standing tail wag.
     $walkSeq = @(1, 0, 1, 2, 3, 2)
     if ($script:isDragging -and $script:dragMoved) {
-        # Picked up: the legs paddle in the air.
+        # Picked up: the legs paddle in the air (in the plane: still the plane).
+        if ($script:dogAct -eq 'plane') { return Get-PlaneFramePath }
         if ($script:dogWalkFrames.Count -eq 4) { return $script:dogWalkFrames[$walkSeq[$script:clockTick % 6]] }
         return $null
     }
@@ -5300,6 +5527,9 @@ function Get-DogFramePath {
             # Spinning round on the spot: stepping legs, facing one way and then the other.
             if ($script:dogWalkFrames.Count -eq 4) { return $script:dogWalkFrames[$walkSeq[$t % 6]] }
             return $null
+        }
+        'plane' {
+            return Get-PlaneFramePath
         }
         'fling' {
             # Gravity mode, coming down: the ears fly up and out like wings (not while going up).
@@ -5478,6 +5708,17 @@ try {
     $script:roamEnabled = $true
     $script:roamSpeed = 3.0
     $script:gravityMode = $false      # $true = walks only on the taskbar, falls when let go
+    $script:flyMode = $false          # $true = 飛行模式: 飛行員汪汪 flies the plane all over the screen
+    $script:planeSoundEnabled = $true
+    $script:planePhase = ''           # glide / land / flare / taxi / stop / cruise
+    $script:planeVX = 0.0
+    $script:planeVY = 0.0
+    $script:planeTarget = $null
+    $script:planeLandY = 0.0
+    $script:planeStopTick = 0
+    $script:planeReady = $false
+    $script:miGravity = $null
+    $script:miFly = $null
     $script:roamTarget = $null
     $script:roamPauseTicks = 60
     $script:roamMoving = $false
@@ -6138,6 +6379,11 @@ try {
         try {
             $script:gravityMode = [bool]$sender.Checked
             $script:roamTarget = $null
+            if ($script:gravityMode -and $script:flyMode) {
+                # Gravity mode switches 飛行模式 off (the plane glides down to the taskbar).
+                $script:flyMode = $false
+                try { $script:miFly.Checked = $false } catch { }
+            }
             if ($script:gravityMode) {
                 if ($script:dogSleeping) { Stop-DogSleep $false }
                 $script:dogAct = ''
@@ -6148,6 +6394,16 @@ try {
         } catch { $null = Write-ErrorLog ('重力模式錯誤：' + $_.ToString()) }
     })
     [void]$cms.Items.Add($miGravity)
+    $script:miGravity = $miGravity
+    $miFly = New-Object System.Windows.Forms.ToolStripMenuItem('飛行模式（穿飛行員汪汪開飛機到處飛）')
+    $miFly.CheckOnClick = $true
+    $miFly.Checked = $false
+    $miFly.Add_Click({
+        param($sender, $e)
+        try { Set-FlyMode ([bool]$sender.Checked) } catch { $null = Write-ErrorLog ('飛行模式錯誤：' + $_.ToString()) }
+    })
+    [void]$cms.Items.Add($miFly)
+    $script:miFly = $miFly
     [void]$cms.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
 
     $miAuto = New-Object System.Windows.Forms.ToolStripMenuItem('自動汪汪叫')
@@ -6236,7 +6492,7 @@ try {
     })
     [void]$cms.Items.Add($miNight)
     $miPlay = New-Object System.Windows.Forms.ToolStripMenuItem('互動設定')
-    foreach ($playInfo in @(@('離開電腦時等你、回來時迎接你', 'away'), @('滑鼠在牠面前左右晃會撲過來', 'tease'), @('滑鼠一直繞圈圈會跑過來追', 'circle'), @('肚子餓、口渴會來討吃的', 'hunger'), @('節日自動換衣服', 'holiday'), @('從右下角叫旺旺時，被視窗擋住會打破螢幕衝出來', 'glass'), @('滑鼠停在頭上會瞇眼享受摸頭', 'headpat'), @('穿警察巡邏車汪汪跑起來時發出鳴笛聲（警示燈一樣會閃）', 'siren'), @('旺旺會隨地大便（右鍵「清潔」掃乾淨）', 'poop'), @('旺旺的小聲音（嚼嚼、舔水、打呼）', 'sounds'), @('早安、午餐、下班時間會來找你', 'daily'))) {
+    foreach ($playInfo in @(@('離開電腦時等你、回來時迎接你', 'away'), @('滑鼠在牠面前左右晃會撲過來', 'tease'), @('滑鼠一直繞圈圈會跑過來追', 'circle'), @('肚子餓、口渴會來討吃的', 'hunger'), @('節日自動換衣服', 'holiday'), @('從右下角叫旺旺時，被視窗擋住會打破螢幕衝出來', 'glass'), @('滑鼠停在頭上會瞇眼享受摸頭', 'headpat'), @('穿警察巡邏車汪汪跑起來時發出鳴笛聲（警示燈一樣會閃）', 'siren'), @('旺旺會隨地大便（右鍵「清潔」掃乾淨）', 'poop'), @('旺旺的小聲音（嚼嚼、舔水、打呼）', 'sounds'), @('早安、午餐、下班時間會來找你', 'daily'), @('開飛機時發出螺旋槳聲', 'propsnd'))) {
         $playItem = New-Object System.Windows.Forms.ToolStripMenuItem([string]$playInfo[0])
         $playItem.Tag = [string]$playInfo[1]
         $playItem.CheckOnClick = $true
@@ -6478,6 +6734,11 @@ try {
         $script:lastClickPat = $false
         if ($moved) {
             $script:roamTarget = $null
+            if ($script:flyMode -and $script:planeReady) {
+                # 飛行模式: let go = flies on from here.
+                Start-PlaneFlight 'cruise' '咻～繼續飛！'
+                return
+            }
             # Let go while still moving fast: the dachshund is thrown and slides on.
             $vx = 0.0
             $vy = 0.0
@@ -6702,7 +6963,11 @@ try {
 
             # 3) Actions: tilting, sniffing, shaking, lying, sleeping, petting
             # A pat or a bark takes over from a small action (not from sleeping or petting).
-            if ($script:dogAct -ne '' -and $script:dogAct -ne 'sleep' -and $script:dogAct -ne 'pet' -and $script:dogAct -ne 'headpat' -and $script:actionMode -ne 'idle') { $script:dogAct = '' }
+            if ($script:dogAct -ne '' -and $script:dogAct -ne 'sleep' -and $script:dogAct -ne 'pet' -and $script:dogAct -ne 'headpat' -and $script:dogAct -ne 'plane' -and $script:actionMode -ne 'idle') { $script:dogAct = '' }
+            # 飛行模式: back in the air after anything else it did.
+            if ($script:flyMode -and $script:dogAct -eq '' -and -not $script:isDragging -and $script:actionMode -eq 'idle') {
+                if ($script:planeReady) { Start-PlaneFlight 'cruise' '' } else { $script:flyMode = $false; try { $script:miFly.Checked = $false } catch { } }
+            }
             if ($script:dogAct -ne '') {
                 $script:dogActTick++
                 $t = $script:dogActTick
@@ -6903,6 +7168,11 @@ try {
                         $xOffset = [int]([Math]::Sin($t / 3.0) * 3)
                         $yOffset = @(-3, 0, -3, -3, 0, -3)[$t % 6]
                     }
+                    'plane' {
+                        $xOffset = 0
+                        $yOffset = 0
+                        Update-PlaneFlight
+                    }
                     'fling' {
                         $xOffset = 0
                         $yOffset = 0
@@ -6939,6 +7209,11 @@ try {
                                 if ($script:flingVY -lt 0) { $script:fallFrameOn = $false }
                             } elseif ($script:flingVY -gt (3.0 * $script:dpiScale) -and ([double]$gb[3] - $ny) -gt ([double]$script:form.Height * 0.05)) {
                                 $script:fallFrameOn = $true
+                            }
+                            if ($script:fallFrameOn -and $script:planeReady -and ([double]$gb[3] - $ny) -gt ([double]$script:form.Height * 0.5)) {
+                                # 飛行員汪汪: on the way down it flies the plane and glides down to the taskbar.
+                                Start-PlaneFlight 'glide' '咻～旺旺開飛機！'
+                                $landed = $false
                             }
                             if ($landed -or $t -gt 250) {
                                 $landSay = '甩甩～'
@@ -7044,7 +7319,7 @@ try {
             }
             if ($script:hovering -and -not $script:isDragging -and -not $menuOpen) {
                 $script:hoverTicks++
-                $petOk = (-not $script:dogSleeping -and $script:dogAct -ne 'eat' -and $script:dogAct -ne 'drink' -and $script:dogAct -ne 'fling' -and $script:dogAct -ne 'tease' -and $script:dogAct -ne 'fetch' -and $script:dogAct -ne 'jerky' -and $script:dogAct -ne 'burst' -and -not $script:alarmRinging)
+                $petOk = (-not $script:dogSleeping -and $script:dogAct -ne 'eat' -and $script:dogAct -ne 'drink' -and $script:dogAct -ne 'fling' -and $script:dogAct -ne 'tease' -and $script:dogAct -ne 'fetch' -and $script:dogAct -ne 'jerky' -and $script:dogAct -ne 'burst' -and $script:dogAct -ne 'plane' -and -not $script:alarmRinging)
                 if ($petOk -and $script:headPatEnabled -and $script:hoverTicks -ge 14 -and $script:dogAct -ne 'headpat' -and $script:dogAct -ne 'pet' -and $script:actionMode -eq 'idle' -and (Test-PointerOnHead)) {
                     Start-DogAction 'headpat' '*'
                 } elseif ($script:hoverTicks -eq 25 -and $petOk -and $script:dogAct -ne 'headpat') { Start-DogAction 'pet' '*' }
@@ -7075,7 +7350,7 @@ try {
             }
 
             # 4b) Gravity mode: not standing on the taskbar (just switched on, another screen ...) = falls down.
-            if ($script:gravityMode -and -not $script:isDragging -and $script:dogAct -ne 'fling' -and $script:dogAct -ne 'tease' -and -not $script:dogSleeping) {
+            if ($script:gravityMode -and -not $script:isDragging -and $script:dogAct -ne 'fling' -and $script:dogAct -ne 'tease' -and $script:dogAct -ne 'plane' -and -not $script:dogSleeping) {
                 try {
                     $gb = Get-GroundBounds
                     if ([Math]::Abs($script:baseLocation.Y - $gb[3]) -gt 2) { Start-DogFling 0.0 0.0 '' }
