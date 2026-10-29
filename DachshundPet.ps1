@@ -191,7 +191,7 @@ if (-not [string]::IsNullOrEmpty($UpdateMode)) {
     }
     exit 0
 }
-$script:appVersion = 'V1.29.0'
+$script:appVersion = 'V1.29.1'
 $script:appTitle = '臘腸狗桌寵 ' + $script:appVersion + '（旺旺）'
 try { $Host.UI.RawUI.WindowTitle = '旺旺（臘腸狗桌寵）- 關閉這個視窗會結束旺旺' } catch { }
 Add-Type -AssemblyName System.Windows.Forms
@@ -1996,6 +1996,10 @@ function Update-OutfitChecks {
 }
 
 function Set-DogOutfit([string]$id) {
+    if ($script:dogAct -eq 'plane' -and $id -ne $script:outfitId) {
+        # Flying: lands first, then changes clothes.
+        if (Request-PlaneLandFirst @{ Kind = 'outfit'; Name = $id }) { Update-OutfitChecks; return }
+    }
     if ($id -ne 'pilot') { $script:outfitBeforeFly = '' }
     $info = $null
     foreach ($o in $script:outfitList) {
@@ -2051,8 +2055,12 @@ function Get-PlaneFramePath {
             return $script:dogPoses['plane_r' + $idx.ToString('00')]
         }
     }
-    $tag = 'l'
-    if ($script:planeVY -gt (1.2 * $u)) { $tag = 'd' } elseif ($script:planeVY -lt (-1.2 * $u)) { $tag = 'u' }
+    $tag = [string]$script:planeTilt
+    if ($tag -eq 'd') { if ($script:planeVY -lt (0.7 * $u)) { $tag = 'l' } }
+    elseif ($tag -eq 'u') { if ($script:planeVY -gt (-0.7 * $u)) { $tag = 'l' } }
+    elseif ($script:planeVY -gt (1.8 * $u)) { $tag = 'd' }
+    elseif ($script:planeVY -lt (-1.8 * $u)) { $tag = 'u' }
+    $script:planeTilt = $tag
     return $script:dogPoses['plane_' + $tag + $k]
 }
 
@@ -2110,6 +2118,7 @@ function Stop-PlaneFlight {
     Hide-PlaneBanner
     $pend = $script:planePending
     $script:planePending = $null
+    if ($null -ne $pend -and [string]$pend.Kind -eq 'outfit') { $script:outfitBeforeFly = '' }
     if (-not $script:flyMode -and -not [string]::IsNullOrEmpty($script:outfitBeforeFly)) {
         # 飛行模式 had put on 飛行員汪汪: back in the outfit from before.
         $back = $script:outfitBeforeFly
@@ -2129,6 +2138,8 @@ function Invoke-PlanePending($pend) {
         'jerky' { Start-JerkyThrow }
         'poop' { Start-PoopWalk ([string]$pend.Say) }
         'rest' { Start-DogRest ([string]$pend.Name) ([string]$pend.Say) }
+        'outfit' { Set-DogOutfit ([string]$pend.Name) }
+        'behind' { Start-DogBehind ([int]$pend.Name) }
     }
 }
 
@@ -2180,7 +2191,7 @@ function Start-PlaneTrick {
         return
     }
     if (($y - $h * 1.2) -ge [double]$b[2]) {
-        $script:planeTrickTick = 0
+        $script:planeTrickTick = 0.0
         $script:planePhase = 'dive'
         Set-Bubble '衝高高～俯衝！'
     }
@@ -2189,6 +2200,9 @@ function Start-PlaneTrick {
 function Update-PlaneFlight {
     if ($script:isDragging) { return }
     $u = Get-PlaneUnit
+    # Moves in small steps every 30 ms (dt = 0.5) for a smooth flight; the speeds are per 60 ms.
+    $dt = [double]$script:timer.Interval / 60.0
+    $script:planeTime += $dt
     $x = [double]$script:baseLocation.X
     $y = [double]$script:baseLocation.Y
     $h = [double]$script:form.Height
@@ -2207,16 +2221,16 @@ function Update-PlaneFlight {
             if ($dir -eq 0) { $dir = 1 }
             if ($script:planePhase -eq 'flare') {
                 # Nose up just before touching down: comes down gently, slows a little.
-                $script:planeVY += (0.8 * $u - $script:planeVY) * 0.2
-                $script:planeVX = $script:planeVX * 0.985
+                $script:planeVY += (0.8 * $u - $script:planeVY) * 0.2 * $dt
+                $script:planeVX = $script:planeVX * [Math]::Pow(0.985, $dt)
             } else {
                 # Gliding: forward at an easy speed, slowly down, a gentle bob.
-                $script:planeVY += ((2.0 + 0.6 * [Math]::Sin($script:dogActTick / 9.0)) * $u - $script:planeVY) * 0.08
-                $script:planeVX += ($dir * 5.0 * $u - $script:planeVX) * 0.04
+                $script:planeVY += ((2.0 + 0.6 * [Math]::Sin($script:planeTime / 9.0)) * $u - $script:planeVY) * 0.08 * $dt
+                $script:planeVX += ($dir * 5.0 * $u - $script:planeVX) * 0.04 * $dt
                 if (($ground - $y) -lt ($h * 0.16)) { $script:planePhase = 'flare' }
             }
-            $nx = $x + $script:planeVX
-            $ny = $y + $script:planeVY
+            $nx = $x + $script:planeVX * $dt
+            $ny = $y + $script:planeVY * $dt
             if ($nx -lt $left) { $nx = $left; $script:planeVX = [Math]::Abs($script:planeVX) }
             if ($nx -gt $right) { $nx = $right; $script:planeVX = -[Math]::Abs($script:planeVX) }
             if ($ny -lt $top) { $ny = $top }
@@ -2230,9 +2244,9 @@ function Update-PlaneFlight {
         }
         'taxi' {
             # Rolling on the wheels, slowing down to a stop.
-            $script:planeVX = $script:planeVX * 0.9
+            $script:planeVX = $script:planeVX * [Math]::Pow(0.9, $dt)
             $b = if ($script:gravityMode) { Get-GroundBounds } else { Get-RoamBounds }
-            $x = [Math]::Min([double]$b[1], [Math]::Max([double]$b[0], $x + $script:planeVX))
+            $x = [Math]::Min([double]$b[1], [Math]::Max([double]$b[0], $x + $script:planeVX * $dt))
             if ([Math]::Abs($script:planeVX) -lt (0.4 * $u)) {
                 $script:planePhase = 'stop'
                 $script:planeStopTick = $script:clockTick + 50
@@ -2245,7 +2259,7 @@ function Update-PlaneFlight {
         'loop' {
             # Round a circle above the spot where it started; the plane turns with it.
             $R = [Math]::Max(1.0, [double]$script:form.Height * 0.85)
-            $script:planeLoopTh += 7.0 * $u * $script:flySpeed / $R
+            $script:planeLoopTh += 7.0 * $u * $script:flySpeed / $R * $dt
             $script:planeVX = $script:planeLoopDir * 5.0 * $u
             $script:planeVY = 0.0
             if ($script:planeLoopTh -ge (2.0 * [Math]::PI)) {
@@ -2264,17 +2278,17 @@ function Update-PlaneFlight {
         'dive' {
             # Climbs steeply, then dives down and levels out again.
             $b = Get-RoamBounds
-            $script:planeTrickTick++
+            $script:planeTrickTick += $dt
             $want = -8.0 * $u * $script:flySpeed
             if ($script:planeTrickTick -gt 22) { $want = 9.0 * $u * $script:flySpeed }
-            $script:planeVY += ($want - $script:planeVY) * 0.25
+            $script:planeVY += ($want - $script:planeVY) * 0.12 * $dt
             if ($script:planeTrickTick -gt 46 -or ($script:planeTrickTick -gt 22 -and $y -ge ([double]$b[3] - 4))) {
                 $script:planePhase = 'cruise'
                 $script:planeTarget = $null
             }
-            if ($y -le ([double]$b[2] + 2) -and $script:planeTrickTick -le 22) { $script:planeTrickTick = 23 }
-            $x = [Math]::Min([double]$b[1], [Math]::Max([double]$b[0], $x + $script:planeVX))
-            $y = [Math]::Min([double]$b[3], [Math]::Max([double]$b[2], $y + $script:planeVY))
+            if ($y -le ([double]$b[2] + 2) -and $script:planeTrickTick -le 22) { $script:planeTrickTick = 23.0 }
+            $x = [Math]::Min([double]$b[1], [Math]::Max([double]$b[0], $x + $script:planeVX * $dt))
+            $y = [Math]::Min([double]$b[3], [Math]::Max([double]$b[2], $y + $script:planeVY * $dt))
         }
         'cruise' {
             # 飛行模式: flies to one spot after another anywhere on the screen (to the mouse pointer when called).
@@ -2297,11 +2311,12 @@ function Update-PlaneFlight {
             $speed = 6.0 * $u * $script:flySpeed
             if ($called) { $speed = 9.0 * $u * [Math]::Max(1.0, $script:flySpeed) }
             if ($d -gt 1) {
-                $script:planeVX += ($dx / $d * $speed - $script:planeVX) * 0.05
-                $script:planeVY += ($dy / $d * $speed * 0.7 - $script:planeVY) * 0.05
+                # Gentle turns: the speed changes a little at a time.
+                $script:planeVX += ($dx / $d * $speed - $script:planeVX) * 0.035 * $dt
+                $script:planeVY += ($dy / $d * $speed * 0.7 - $script:planeVY) * 0.035 * $dt
             }
-            $x = [Math]::Min([double]$b[1], [Math]::Max([double]$b[0], $x + $script:planeVX))
-            $y = [Math]::Min([double]$b[3], [Math]::Max([double]$b[2], $y + $script:planeVY + 0.6 * [Math]::Sin($script:dogActTick / 8.0)))
+            $x = [Math]::Min([double]$b[1], [Math]::Max([double]$b[0], $x + $script:planeVX * $dt))
+            $y = [Math]::Min([double]$b[3], [Math]::Max([double]$b[2], $y + ($script:planeVY + 0.5 * [Math]::Sin($script:planeTime / 8.0)) * $dt))
             if ($d -lt (40.0 * $u)) {
                 $script:planeTarget = $null
                 if ($called) {
@@ -2317,7 +2332,7 @@ function Update-PlaneFlight {
         }
         default { $script:dogAct = ''; return }
     }
-    if ($script:planePhase -ne 'loop' -and [Math]::Abs($script:planeVX) -gt (0.3 * $u)) { $script:facingLeft = ($script:planeVX -lt 0) }
+    if ($script:planePhase -ne 'loop' -and [Math]::Abs($script:planeVX) -gt (1.0 * $u)) { $script:facingLeft = ($script:planeVX -lt 0) }
     $script:baseLocation = [System.Drawing.Point]::new([int][Math]::Round($x), [int][Math]::Round($y))
 }
 
@@ -3565,6 +3580,7 @@ function Invoke-DogSummon {
 }
 
 function Start-DogBehind([int]$minutes) {
+    if (Request-PlaneLandFirst @{ Kind = 'behind'; Name = [string]$minutes }) { return }
     # 先躲起來: 旺旺 goes behind every window (just above the desktop) and keeps walking about back there.
     # $minutes = 0: until it is called back.
     if ($script:dogHidden) { Show-Dog '' }
@@ -6042,7 +6058,10 @@ try {
     $script:miFly = $null
     $script:flySpeed = 1.0            # 飛行速度: 0.6 slow / 1.0 normal / 1.6 fast
     $script:miFlySpeed = @()
-    $script:planeTrickTick = 0
+    $script:planeTrickTick = 0.0
+    $script:planeTime = 0.0           # flight time in 60 ms steps (also counts halves while flying at 30 ms)
+    $script:planeTilt = 'l'           # nose picture now: d / l / u (changes only past a margin, so it does not flicker)
+    $script:tickAcc = 0.0
     $script:planeLoopCX = 0.0
     $script:planeLoopCY = 0.0
     $script:planeLoopTh = 0.0
@@ -6743,7 +6762,7 @@ try {
     $script:miFly = $miFly
     $miSpeedFly = New-Object System.Windows.Forms.ToolStripMenuItem('飛行速度')
     $speedItems = @()
-    foreach ($fs in @(@('慢', 0.6), @('一般', 1.0), @('快', 1.6))) {
+    foreach ($fs in @(@('慢', 0.6), @('一般', 1.0), @('快', 1.4))) {
         $fsi = New-Object System.Windows.Forms.ToolStripMenuItem([string]$fs[0])
         $fsi.Tag = [double]$fs[1]
         $fsi.Checked = ([double]$fs[1] -eq $script:flySpeed)
@@ -7237,7 +7256,10 @@ try {
                 }
             }
             # A tick is 60 ms; in power-saving mode one 240 ms tick counts as 4.
-            $step = [Math]::Max(1, [int][Math]::Round($script:timer.Interval / 60.0))
+            # A tick is 60 ms (30 ms while flying the plane: two of them make one step).
+            $script:tickAcc += [double]$script:timer.Interval / 60.0
+            $step = [int][Math]::Floor($script:tickAcc + 0.0001)
+            $script:tickAcc -= $step
             $script:idleTick += $step
             $script:clockTick += $step
             if ($script:bubbleTicks -gt 0) {
@@ -7829,7 +7851,7 @@ try {
             # 10) Power saving: fast asleep (sent to bed, or asleep for the night) = 4 updates a second instead of 16.
             $calm = $script:dogSleeping -and $script:dogActLen -eq 0 -and ($script:dogActTick - $script:dogSleepPre) -ge 30 -and
                 -not $script:isDragging -and -not $script:hovering -and -not $menuOpen -and $script:bellyRubTicks -le 0
-            $wantInterval = if ($calm) { 240 } else { 60 }
+            $wantInterval = if ($calm) { 240 } elseif ($script:dogAct -eq 'plane' -and $script:planePhase -ne 'stop') { 30 } else { 60 }
             if ($script:timer.Interval -ne $wantInterval) { $script:timer.Interval = $wantInterval }
             $script:tickErrors = 0
         } catch {
