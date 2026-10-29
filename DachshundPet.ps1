@@ -191,7 +191,7 @@ if (-not [string]::IsNullOrEmpty($UpdateMode)) {
     }
     exit 0
 }
-$script:appVersion = 'V1.26.1'
+$script:appVersion = 'V1.27.0'
 $script:appTitle = '臘腸狗桌寵 ' + $script:appVersion + '（旺旺）'
 try { $Host.UI.RawUI.WindowTitle = '旺旺（臘腸狗桌寵）- 關閉這個視窗會結束旺旺' } catch { }
 Add-Type -AssemblyName System.Windows.Forms
@@ -5446,7 +5446,8 @@ try {
         @('astro', '太空人汪汪', 'clothes\astro', 'costume'),
         @('chef', '廚師汪汪', 'clothes\chef', 'costume'),
         @('sweater', '冬天毛衣圍巾汪汪', 'clothes\sweater', 'costume'),
-        @('xiaolongbao', '小籠包汪汪', 'clothes\xiaolongbao', 'costume')
+        @('xiaolongbao', '小籠包汪汪', 'clothes\xiaolongbao', 'costume'),
+        @('pilot', '老式飛行員汪汪', 'clothes\pilot', 'costume')
     )
     $script:outfitId = 'none'
     $script:outfitDir = ''
