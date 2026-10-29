@@ -191,7 +191,7 @@ if (-not [string]::IsNullOrEmpty($UpdateMode)) {
     }
     exit 0
 }
-$script:appVersion = 'V1.30.0'
+$script:appVersion = 'V1.30.1'
 $script:appTitle = '臘腸狗桌寵 ' + $script:appVersion + '（旺旺）'
 try { $Host.UI.RawUI.WindowTitle = '旺旺（臘腸狗桌寵）- 關閉這個視窗會結束旺旺' } catch { }
 Add-Type -AssemblyName System.Windows.Forms
@@ -7659,6 +7659,9 @@ try {
                         $xOffset = 0
                         $yOffset = 0
                         Update-PlaneFlight
+                        # Landed and the waiting action (eat, drink ...) has just started: its own count starts at 0,
+                        # so it is not ended straight away by the flight's long count.
+                        $t = $script:dogActTick
                     }
                     'fling' {
                         $xOffset = 0
