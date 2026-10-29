@@ -191,7 +191,7 @@ if (-not [string]::IsNullOrEmpty($UpdateMode)) {
     }
     exit 0
 }
-$script:appVersion = 'V1.29.1'
+$script:appVersion = 'V1.30.0'
 $script:appTitle = '臘腸狗桌寵 ' + $script:appVersion + '（旺旺）'
 try { $Host.UI.RawUI.WindowTitle = '旺旺（臘腸狗桌寵）- 關閉這個視窗會結束旺旺' } catch { }
 Add-Type -AssemblyName System.Windows.Forms
@@ -2221,13 +2221,21 @@ function Update-PlaneFlight {
             if ($dir -eq 0) { $dir = 1 }
             if ($script:planePhase -eq 'flare') {
                 # Nose up just before touching down: comes down gently, slows a little.
-                $script:planeVY += (0.8 * $u - $script:planeVY) * 0.2 * $dt
+                $script:planeVY = [Math]::Max(2.0 * $u, $script:planeVY + (2.0 * $u - $script:planeVY) * 0.2 * $dt)
                 $script:planeVX = $script:planeVX * [Math]::Pow(0.985, $dt)
             } else {
-                # Gliding: forward at an easy speed, slowly down, a gentle bob.
-                $script:planeVY += ((2.0 + 0.6 * [Math]::Sin($script:planeTime / 9.0)) * $u - $script:planeVY) * 0.08 * $dt
+                # Gliding: forward at an easy speed, down at a pace that reaches the ground in a few seconds
+                # (quicker when something is waiting to be done after landing), a gentle bob.
+                $dist = [Math]::Max(0.0, $ground - $y)
+                $rate = 60.0
+                $steer = 0.08
+                $cap = 7.0
+                $flareAt = $h * 0.16
+                if ($null -ne $script:planePending) { $rate = 25.0; $steer = 0.35; $cap = 18.0; $flareAt = $h * 0.1 }
+                $vyWant = [Math]::Min($cap * $u, [Math]::Max(2.0 * $u, $dist / $rate)) + 0.6 * $u * [Math]::Sin($script:planeTime / 9.0)
+                $script:planeVY += ($vyWant - $script:planeVY) * [Math]::Min(1.0, $steer * $dt)
                 $script:planeVX += ($dir * 5.0 * $u - $script:planeVX) * 0.04 * $dt
-                if (($ground - $y) -lt ($h * 0.16)) { $script:planePhase = 'flare' }
+                if ($dist -lt [Math]::Max($flareAt, $script:planeVY * 4.0)) { $script:planePhase = 'flare' }
             }
             $nx = $x + $script:planeVX * $dt
             $ny = $y + $script:planeVY * $dt
@@ -2244,7 +2252,7 @@ function Update-PlaneFlight {
         }
         'taxi' {
             # Rolling on the wheels, slowing down to a stop.
-            $script:planeVX = $script:planeVX * [Math]::Pow(0.9, $dt)
+            $script:planeVX = $script:planeVX * [Math]::Pow(0.85, $dt)
             $b = if ($script:gravityMode) { Get-GroundBounds } else { Get-RoamBounds }
             $x = [Math]::Min([double]$b[1], [Math]::Max([double]$b[0], $x + $script:planeVX * $dt))
             if ([Math]::Abs($script:planeVX) -lt (0.4 * $u)) {
@@ -2362,8 +2370,43 @@ function Save-BannerSetting {
 }
 
 function Get-BannerMenuText {
-    if ([string]::IsNullOrEmpty($script:bannerText)) { return '飛機彩帶留言：沒有（點這裡寫）…' }
-    return ('飛機彩帶留言：「' + $script:bannerText + '」（點這裡修改）…')
+    if ([string]::IsNullOrEmpty($script:bannerText)) { return '彩帶留言…' }
+    return ('彩帶留言：「' + $script:bannerText + '」…')
+}
+
+function New-MenuIcon([int]$code, [int]$cr, [int]$cg, [int]$cb) {
+    # A small picture in front of a menu name: one symbol from the Windows emoji font, in one colour.
+    try {
+        $sz = [Math]::Max(16, [int](Get-Scaled 16))
+        $bmp = [System.Drawing.Bitmap]::new($sz, $sz, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+        $gr = [System.Drawing.Graphics]::FromImage($bmp)
+        try {
+            $gr.Clear([System.Drawing.Color]::Transparent)
+            $gr.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAlias
+            $font = [System.Drawing.Font]::new('Segoe UI Emoji', [float]($sz * 0.7), [System.Drawing.FontStyle]::Regular, [System.Drawing.GraphicsUnit]::Pixel)
+            $br = [System.Drawing.SolidBrush]::new([System.Drawing.Color]::FromArgb(255, $cr, $cg, $cb))
+            $sf = [System.Drawing.StringFormat]::new()
+            try {
+                $sf.Alignment = [System.Drawing.StringAlignment]::Center
+                $sf.LineAlignment = [System.Drawing.StringAlignment]::Center
+                $gr.DrawString([char]::ConvertFromUtf32($code), $font, $br, [System.Drawing.RectangleF]::new(0, 0, [float]$sz, [float]$sz), $sf)
+            } finally { $sf.Dispose(); $br.Dispose(); $font.Dispose() }
+        } finally { $gr.Dispose() }
+        return $bmp
+    } catch {
+        return $null
+    }
+}
+
+function Set-MenuLook($item, [string]$text, [string]$tip, [int]$code, [int]$cr, [int]$cg, [int]$cb) {
+    # Short name, the longer explanation as a tip when the mouse rests on it, and a small picture.
+    if ($null -eq $item) { return }
+    if (-not [string]::IsNullOrEmpty($text)) { $item.Text = $text }
+    if (-not [string]::IsNullOrEmpty($tip)) { $item.ToolTipText = $tip }
+    if ($code -gt 0) {
+        $img = New-MenuIcon $code $cr $cg $cb
+        if ($null -ne $img) { $item.Image = $img }
+    }
 }
 
 function Show-BannerDialog {
@@ -7055,6 +7098,73 @@ try {
     })
     [void]$miAboutRoot.DropDownItems.Add($miUpdAuto)
     [void]$cms.Items.Add($miAboutRoot)
+
+    # ----- Menu layout: the everyday things on top, everything else in a few groups -----
+    $cms.ShowItemToolTips = $true
+    $script:miWakeTop = $miWake
+    $script:miStopRing = New-Object System.Windows.Forms.ToolStripMenuItem('停止鬧鐘叫聲')
+    $script:miStopRing.Add_Click({ try { Stop-AlarmRing '好～知道了！' } catch { $null = Write-ErrorLog ('鬧鐘錯誤：' + $_.ToString()) } })
+    $script:miLand = New-Object System.Windows.Forms.ToolStripMenuItem('降落')
+    $script:miLand.Add_Click({ try { Set-FlyMode $false } catch { $null = Write-ErrorLog ('飛行模式錯誤：' + $_.ToString()) } })
+    $miCare = New-Object System.Windows.Forms.ToolStripMenuItem('照顧旺旺')
+    $miMoves = New-Object System.Windows.Forms.ToolStripMenuItem('動作和才藝')
+    $miGo = New-Object System.Windows.Forms.ToolStripMenuItem('走動與飛行')
+    $miTime = New-Object System.Windows.Forms.ToolStripMenuItem('時間小幫手')
+    $miSet = New-Object System.Windows.Forms.ToolStripMenuItem('設定')
+    Set-MenuLook $script:miMood '' '多摸摸牠、餵牠，心情會變好' 0x2665 220 50 70
+    Set-MenuLook $miFeed '' '旺旺吃碗裡的點心' 0x1F356 170 90 40
+    Set-MenuLook $miJerky '' '肉乾從滑鼠的位置飛出去，旺旺跑過去吃' 0x1F357 170 90 40
+    Set-MenuLook $miOutfit '' '日常衣服、節日衣服、造型扮裝' 0x1F455 60 110 200
+    Set-MenuLook $miSleep '' '選一種睡姿，睡到你叫醒牠' 0x1F4A4 90 90 180
+    Set-MenuLook $miWake '' '' 0x2600 230 160 0
+    Set-MenuLook $script:miStopRing '' '鬧鐘正在叫，點這裡讓旺旺停下來' 0x1F515 200 60 60
+    Set-MenuLook $miFly '' '穿飛行員汪汪開飛機到處飛（跟重力模式只能開一個）' 0x2708 40 120 200
+    Set-MenuLook $script:miLand '' '飛機降落到畫面下方，停好後變回原本的衣服' 0x1F6EC 40 120 200
+    Set-MenuLook $miCare '' '' 0x1F43E 150 100 60
+    Set-MenuLook $miWater '' '碗裡換成水，旺旺舔水喝' 0x1F4A7 40 140 220
+    Set-MenuLook $miClean '清潔' '滑鼠變成掃把，點大便把它掃掉（右鍵或 Esc 結束）' 0x1F9F9 150 110 60
+    Set-MenuLook $miMoves '' '' 0x1F415 150 100 60
+    Set-MenuLook $miGo '' '' 0x1F6B6 80 130 80
+    Set-MenuLook $miRoam '自由走動' '在桌面上到處走' 0 0 0 0
+    Set-MenuLook $miGravity '重力模式' '只在工作列上走，放開會掉下來（跟飛行模式只能開一個）' 0 0 0 0
+    Set-MenuLook $script:miBanner '' '開飛機時，飛機後面拖著寫了這句話的彩帶' 0 0 0 0
+    Set-MenuLook $miHide '先躲起來' '躲到所有視窗後面照常走動，叫牠時會打破螢幕衝出來' 0x1F648 170 120 60
+    Set-MenuLook $miTime '' '' 0x23F0 200 80 60
+    Set-MenuLook $miAlarm '鬧鐘' '時間到旺旺會跑出來汪汪叫' 0 0 0 0
+    Set-MenuLook $miFocus '番茄鐘' '專心時旺旺安靜陪你，時間到提醒你休息' 0 0 0 0
+    Set-MenuLook $miHealth '健康提醒' '提醒你喝水、起來動一動' 0 0 0 0
+    Set-MenuLook $miSet '' '' 0x2699 110 110 120
+    Set-MenuLook $miAutoSound '發出叫聲' '自動汪汪叫時用旺旺真正的叫聲' 0 0 0 0
+    Set-MenuLook $miNap '自己午睡' '沒人理旺旺時會自己午睡' 0 0 0 0
+    Set-MenuLook $miNight '晚上自動睡覺' '晚上 10 點到早上 7 點睡在狗窩' 0 0 0 0
+    Set-MenuLook $miDot '浮動按鈕' '一顆旺旺頭像按鈕，右鍵就能開這個選單' 0 0 0 0
+    Set-MenuLook $miDesk '建立桌面捷徑' '在桌面建立「開啟旺旺」捷徑' 0 0 0 0
+    Set-MenuLook $miSmooth '平滑邊緣' '建議打開，旺旺的邊緣比較好看' 0 0 0 0
+    Set-MenuLook $miDisplay '顯示測試' '用不透明背景顯示，看不到旺旺時用來檢查' 0 0 0 0
+    Set-MenuLook $miBirthday '設定生日…' '生日當天穿生日派對裝' 0 0 0 0
+    Set-MenuLook $miAboutRoot '' '' 0x2139 60 110 200
+    Set-MenuLook $miClose '' '' 0x2716 150 60 60
+    $cms.Items.Clear()
+    foreach ($it in @($script:miMood, (New-Object System.Windows.Forms.ToolStripSeparator), $miFeed, $miJerky, $miOutfit, $miSleep, $miWake, $script:miStopRing, $miFly, $script:miLand,
+            (New-Object System.Windows.Forms.ToolStripSeparator), $miCare, $miMoves, $miGo, $miHide, $miTime, $miSet,
+            (New-Object System.Windows.Forms.ToolStripSeparator), $miAboutRoot, $miClose)) { [void]$cms.Items.Add($it) }
+    foreach ($it in @($miWater, $miClean)) { [void]$miCare.DropDownItems.Add($it) }
+    foreach ($it in @($miActions, $miTricks)) { [void]$miMoves.DropDownItems.Add($it) }
+    foreach ($it in @($miRoam, $miRoamSpeed, $miChase, (New-Object System.Windows.Forms.ToolStripSeparator), $miGravity,
+            (New-Object System.Windows.Forms.ToolStripSeparator), $miSpeedFly, $script:miBanner)) { [void]$miGo.DropDownItems.Add($it) }
+    foreach ($it in @($miAlarm, $miFocus, $miHealth)) { [void]$miTime.DropDownItems.Add($it) }
+    foreach ($it in @($miAuto, $miAutoSound, $miBarkGap, (New-Object System.Windows.Forms.ToolStripSeparator), $miNap, $miNight,
+            (New-Object System.Windows.Forms.ToolStripSeparator), $miPlay, (New-Object System.Windows.Forms.ToolStripSeparator),
+            $miTopMost, $miDot, $miSize, $miSmooth, $miDisplay, (New-Object System.Windows.Forms.ToolStripSeparator), $miDesk)) { [void]$miSet.DropDownItems.Add($it) }
+    foreach ($sub in @($miCare, $miMoves, $miGo, $miTime, $miSet, $miAboutRoot)) { try { $sub.DropDown.ShowItemToolTips = $true } catch { } }
+    # Shown only when they can be used: wake up (asleep), stop the alarm (ringing), land (flying).
+    $cms.Add_Opening({
+        try {
+            $script:miWakeTop.Available = [bool]$script:dogSleeping
+            $script:miStopRing.Available = [bool]$script:alarmRinging
+            $script:miLand.Available = ([bool]$script:flyMode -and $script:dogAct -eq 'plane')
+        } catch { }
+    })
     $pic.ContextMenuStrip = $cms
     $bubble.ContextMenuStrip = $cms
     $form.ContextMenuStrip = $cms
