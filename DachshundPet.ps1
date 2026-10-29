@@ -191,7 +191,7 @@ if (-not [string]::IsNullOrEmpty($UpdateMode)) {
     }
     exit 0
 }
-$script:appVersion = 'V1.26.0'
+$script:appVersion = 'V1.26.1'
 $script:appTitle = '臘腸狗桌寵 ' + $script:appVersion + '（旺旺）'
 try { $Host.UI.RawUI.WindowTitle = '旺旺（臘腸狗桌寵）- 關閉這個視窗會結束旺旺' } catch { }
 Add-Type -AssemblyName System.Windows.Forms
@@ -1618,13 +1618,21 @@ function Update-DogPoop {
     # Every 3 seconds: time for a poop? And 旺旺 walks away when it is standing next to one.
     $now = Get-Date
     if ($script:poops.Count -gt 0 -and -not $script:dogSleeping -and $script:dogAct -eq '' -and -not $script:isDragging -and -not $script:begging -and
-        $script:clockTick -ge $script:avoidUntil -and $script:clockTick -ge $script:summonRunUntil -and $script:clockTick -ge $script:bedWalkUntil) {
+        $script:clockTick -ge $script:avoidUntil -and $script:clockTick -ge $script:summonRunUntil -and $script:clockTick -ge $script:bedWalkUntil -and -not $script:poopWalking) {
         $foot = Get-PoopFoot
         $r = $script:form.Width * 0.8
         $near = Get-PoopNear $foot[0] $foot[1] $r
         if ($null -ne $near) { Move-AwayFromPoop $near ($script:rng.Next(0, 3) -eq 0) }
     }
+    if ($script:poopWalking -and $script:clockTick -ge $script:poopWalkUntil -and $script:dogAct -eq '' -and -not $script:isDragging) {
+        # Walked long enough without arriving (blocked somewhere): does it right here.
+        Stop-PoopWalk
+        $script:roamTarget = $null
+        Start-DogAction 'poop' ''
+        return
+    }
     if (-not $script:poopEnabled -or $now -lt $script:poopNextAt) { return }
+    if ($script:poopWalking) { return }
     if ($script:dogSleeping -or $script:dogHidden -or $script:dogBehind -or $script:awaySeen -or $script:alarmRinging -or $script:focusState -eq 'focus') { return }
     if ($script:dogAct -ne '' -or $script:actionMode -ne 'idle' -or $script:isDragging -or $script:begging) { return }
     if (-not (Test-DogAction 'poop') -or $null -eq (Get-PoopImage)) { $script:poopNextAt = $now.AddMinutes(60); return }
@@ -1634,7 +1642,62 @@ function Update-DogPoop {
         return
     }
     $script:poopNextAt = $now.AddMinutes($script:rng.Next(60, 151))
-    Start-DogAction 'poop' ''
+    Start-PoopWalk ''
+}
+
+function Get-PoopSpot {
+    # A random spot a little way off (not next to an old poop) where 旺旺 goes to do its business.
+    $b = Get-RoamBounds
+    if ($script:gravityMode) {
+        $gb = Get-GroundBounds
+        $b = @($gb[0], $gb[1], $gb[3], $gb[3])
+    }
+    $w = [double]$script:form.Width
+    $best = $null
+    for ($try = 0; $try -lt 20; $try++) {
+        $ang = $script:rng.NextDouble() * 2.0 * [Math]::PI
+        $len = $w * (1.2 + $script:rng.NextDouble() * 1.8)
+        $tx = [int]($script:roamX + [Math]::Cos($ang) * $len)
+        $ty = [int]($script:roamY + [Math]::Sin($ang) * $len * 0.4)
+        $tx = [Math]::Min([Math]::Max($tx, [int]$b[0]), [int]$b[1])
+        $ty = [Math]::Min([Math]::Max($ty, [int]$b[2]), [int]$b[3])
+        $best = [System.Drawing.Point]::new($tx, $ty)
+        $far = ([Math]::Abs($tx - $script:roamX) + [Math]::Abs($ty - $script:roamY)) -gt ($w * 0.6)
+        $fx = $tx + $w / 2.0
+        $fy = $ty + $script:form.Height * 674.0 / 768.0
+        if ($far -and ($script:poops.Count -eq 0 -or $null -eq (Get-PoopNear $fx $fy ($w * 0.9)))) { break }
+    }
+    return $best
+}
+
+function Start-PoopWalk([string]$say) {
+    # Like a real dog: walks off sniffing for a good spot (stopping to sniff once or twice), then turns round and squats.
+    if (-not (Test-DogAction 'poop')) { Set-Bubble '少了這個動作的圖片'; return }
+    if ($script:dogSleeping) { Stop-DogSleep }
+    $script:roamX = [double]$script:baseLocation.X
+    $script:roamY = [double]$script:baseLocation.Y
+    $script:poopWalkStops = $script:rng.Next(1, 3)
+    $script:poopWalkUntil = $script:clockTick + 900
+    $script:poopWalking = $true
+    $script:roamTarget = Get-PoopSpot
+    $script:roamPauseTicks = 0
+    $script:begging = $false
+    $script:circleChaseUntil = 0
+    $script:summonRunUntil = 0
+    $script:bedWalkUntil = 0
+    if ($script:dogAct -ne '') { $script:dogAct = '' }
+    $script:actionMode = 'idle'
+    if ($say -ne '') { Set-Bubble $say }
+    else {
+        $lines = @('嗯…旺旺要找個地方…', '（東聞聞、西聞聞）', '等一下，我去一下下～')
+        Set-Bubble ([string]$lines[$script:rng.Next(0, $lines.Count)])
+    }
+}
+
+function Stop-PoopWalk {
+    $script:poopWalking = $false
+    $script:poopWalkUntil = 0
+    $script:poopWalkStops = 0
 }
 
 function Move-AwayFromPoop($p, [bool]$say) {
@@ -1988,7 +2051,9 @@ function Step-Roam {
         $script:roamTarget = Get-BedSpot
         $summonRun = $false
     }
-    $chasing = ([bool]$script:dogChaseMouse -or [bool]$script:begging -or $circleChase -or $summonRun) -and -not $bedRun
+    $poopRun = ([bool]$script:poopWalking -and -not $bedRun -and -not $summonRun)
+    if ($poopRun -and $null -eq $script:roamTarget) { $script:roamTarget = Get-PoopSpot }
+    $chasing = ([bool]$script:dogChaseMouse -or [bool]$script:begging -or $circleChase -or $summonRun) -and -not $bedRun -and -not $poopRun
     if ($chasing -and ($script:clockTick % 15) -eq 0) { $script:roamTarget = $null }
     if ($null -eq $script:roamTarget) {
         $b = Get-RoamBounds
@@ -2054,6 +2119,20 @@ function Step-Roam {
             if ($null -eq $bw) { $bw = @{ Manual = $true; Night = $false } }
             Start-DogSleep ([bool]$bw.Manual) 'bed_00' ([bool]$bw.Night)
             $script:roamWalkTicks = 0
+            return
+        }
+        if ($poopRun) {
+            $script:roamWalkTicks = 0
+            if ($script:poopWalkStops -gt 0) {
+                # Stops to sniff the ground, then walks on to the next spot.
+                $script:poopWalkStops--
+                $script:poopWalkUntil = $script:clockTick + 900
+                Start-DogAction 'sniff' ''
+                return
+            }
+            # Found the spot: turns round, squats.
+            Stop-PoopWalk
+            Start-DogAction 'poop' ''
             return
         }
         if ($summonRun) {
@@ -2828,6 +2907,7 @@ function Invoke-DogSummon {
     $wasBehind = [bool]$script:dogBehind
     if ($wasBehind) { Stop-DogBehind }
     $script:bedWalkUntil = 0
+    Stop-PoopWalk
     $burst = $false
     $canBurst = ($script:glassEnabled -and -not $script:dogHidden -and $script:glassTick -lt 0 -and $script:dogAct -ne 'burst')
     if ($wasBehind) { Write-GlassCheck ('called back: smooth=' + $script:smoothMode + ' coverCheck=' + $script:glassAvailable + ' glassOn=' + $script:glassEnabled + ' act=' + $script:dogAct + ' canBurst=' + $canBurst) }
@@ -2954,6 +3034,7 @@ function Start-DogBehind([int]$minutes) {
     $script:behindUntil = if ($minutes -gt 0) { (Get-Date).AddMinutes($minutes) } else { [DateTime]::MaxValue }
     $script:dogBehind = $true
     $script:bedWalkUntil = 0
+    Stop-PoopWalk
     $script:begging = $false
     $script:circleChaseUntil = 0
     $script:summonRunUntil = 0
@@ -4963,6 +5044,7 @@ function Start-DogSleep([bool]$manual, [string]$style = '', [bool]$night = $fals
     }
     $script:bedArrived = $false
     $script:bedWalkUntil = 0
+    Stop-PoopWalk
     $script:dogSleepPose = $style
     $script:dogSleeping = $true
     $script:bellyRubTicks = 0
@@ -5424,6 +5506,9 @@ try {
     $script:topMostWanted = $true
     $script:bedWalkUntil = 0
     $script:bedWalk = $null
+    $script:poopWalking = $false
+    $script:poopWalkUntil = 0
+    $script:poopWalkStops = 0
     $script:bedArrived = $false
     $script:trayTextNormal = '旺旺（點一下叫牠過來）'
     $script:glassEnabled = $true
@@ -5721,7 +5806,9 @@ try {
         $daItem.Tag = [string]$da[1]
         $daItem.Add_Click({
             param($sender, $e)
-            try { Start-DogAction ([string]$sender.Tag) '*' } catch { $null = Write-ErrorLog ('臘腸狗動作錯誤：' + $_.ToString()) }
+            try {
+                if ([string]$sender.Tag -eq 'poop') { Start-PoopWalk '' } else { Start-DogAction ([string]$sender.Tag) '*' }
+            } catch { $null = Write-ErrorLog ('臘腸狗動作錯誤：' + $_.ToString()) }
         })
         [void]$miActions.DropDownItems.Add($daItem)
     }
@@ -6623,6 +6710,7 @@ try {
                     'poop' {
                         $xOffset = 0
                         $yOffset = 0
+                        if ($t -eq 6 -or $t -eq 11) { $script:facingLeft = -not $script:facingLeft }
                         if ($t -eq 18) { Set-Bubble '嗯～～' }
                         if ($t -ge 18 -and $t -lt 56) { $xOffset = @(0, 1, 0, -1)[$t % 4] }
                         if ($t -eq 52) { try { Add-DogPoop } catch { $null = Write-ErrorLog ('大便錯誤：' + $_.ToString()) } }
@@ -6994,7 +7082,7 @@ try {
             }
 
             # 5) Free roaming (not during an action)
-            if (($script:roamEnabled -or $script:begging -or $script:clockTick -lt $script:summonRunUntil -or $script:clockTick -lt $script:bedWalkUntil -or $script:clockTick -lt $script:avoidUntil) -and -not $script:isDragging -and -not $menuOpen -and $script:dogAct -eq '' -and $script:focusState -ne 'focus') {
+            if (($script:roamEnabled -or $script:begging -or $script:poopWalking -or $script:clockTick -lt $script:summonRunUntil -or $script:clockTick -lt $script:bedWalkUntil -or $script:clockTick -lt $script:avoidUntil) -and -not $script:isDragging -and -not $menuOpen -and $script:dogAct -eq '' -and $script:focusState -ne 'focus') {
                 try {
                     Step-Roam
                 } catch {
