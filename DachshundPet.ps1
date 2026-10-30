@@ -191,7 +191,7 @@ if (-not [string]::IsNullOrEmpty($UpdateMode)) {
     }
     exit 0
 }
-$script:appVersion = 'V1.34.0'
+$script:appVersion = 'V1.34.1'
 $script:appTitle = '臘腸狗桌寵 ' + $script:appVersion + '（旺旺）'
 try { $Host.UI.RawUI.WindowTitle = '旺旺（臘腸狗桌寵）- 關閉這個視窗會結束旺旺' } catch { }
 Add-Type -AssemblyName System.Windows.Forms
@@ -2126,6 +2126,7 @@ function Start-PlaneFlight([string]$phase, [string]$say) {
     }
     $script:planePhase = $phase
     $script:planeTarget = $null
+    $script:planeTurning = $false
     $script:dogAct = 'plane'
     $script:dogActTick = 0
     $script:dogActLen = 0
@@ -2234,12 +2235,14 @@ function Start-PlaneTrick {
         $script:planeLoopTh = 0.0
         $script:planeLoopDir = $dir
         $script:planePhase = 'loop'
+        $script:planeTurning = $false
         Set-Bubble '翻個筋斗～！'
         return
     }
     if (($y - $h * 1.2) -ge [double]$b[2]) {
         $script:planeTrickTick = 0.0
         $script:planePhase = 'dive'
+        $script:planeTurning = $false
         Set-Bubble '衝高高～俯衝！'
     }
 }
@@ -2307,8 +2310,9 @@ function Update-PlaneFlight {
             }
             $nx = $x + $script:planeVX * $dt
             $ny = $y + $script:planeVY * $dt
-            if ($nx -lt $left) { $nx = $left; $script:planeVX = [Math]::Abs($script:planeVX) }
-            if ($nx -gt $right) { $nx = $right; $script:planeVX = -[Math]::Abs($script:planeVX) }
+            # At the edge of the screen it turns round and glides back the other way, nose first.
+            if ($nx -lt $left) { $nx = $left; $script:planeVX = [Math]::Max(2.5 * $u, [Math]::Abs($script:planeVX) * 0.7) }
+            if ($nx -gt $right) { $nx = $right; $script:planeVX = -[Math]::Max(2.5 * $u, [Math]::Abs($script:planeVX) * 0.7) }
             if ($ny -lt $top) { $ny = $top }
             if ($ny -ge $ground) {
                 $ny = $ground
@@ -2363,6 +2367,8 @@ function Update-PlaneFlight {
                 $script:planeTarget = $null
             }
             if ($y -le ([double]$b[2] + 2) -and $script:planeTrickTick -le 22) { $script:planeTrickTick = 23.0 }
+            $diveGap = if ($script:planeVX -ge 0) { [double]$b[1] - $x } else { $x - [double]$b[0] }
+            if ($diveGap -lt ([double]$script:form.Width * 0.3)) { $script:planePhase = 'cruise'; $script:planeTarget = $null }
             $x = [Math]::Min([double]$b[1], [Math]::Max([double]$b[0], $x + $script:planeVX * $dt))
             $y = [Math]::Min([double]$b[3], [Math]::Max([double]$b[2], $y + $script:planeVY * $dt))
         }
@@ -2370,30 +2376,80 @@ function Update-PlaneFlight {
             # 飛行模式: flies to one spot after another anywhere on the screen (to the mouse pointer when called).
             $b = Get-RoamBounds
             $called = ($script:clockTick -lt $script:summonRunUntil)
+            # Spots to fly to stay away from the edges, so there is room to turn round.
+            $tm = [double]$script:form.Width * 0.3 + 6.0 * $u * [Math]::Max(1.0, $script:flySpeed) * 14.0
+            $tL = [double]$b[0] + $tm
+            $tR = [double]$b[1] - $tm
+            if ($tR -lt $tL) { $tL = ([double]$b[0] + [double]$b[1]) / 2.0; $tR = $tL }
             if ($called) {
                 $cur = [System.Windows.Forms.Cursor]::Position
-                $script:planeTarget = [System.Drawing.PointF]::new([float]($cur.X - $script:form.Width / 2), [float]($cur.Y - $h * 0.55))
+                $cx = [Math]::Min($tR, [Math]::Max($tL, [double]$cur.X - $script:form.Width / 2))
+                $script:planeTarget = [System.Drawing.PointF]::new([float]$cx, [float]($cur.Y - $h * 0.55))
             } elseif ($null -eq $script:planeTarget) {
                 for ($try = 0; $try -lt 8; $try++) {
-                    $tx = $script:rng.Next([int]$b[0], [int]$b[1] + 1)
+                    $tx = $script:rng.Next([int]$tL, [int]$tR + 1)
                     $ty = $script:rng.Next([int]$b[2], [int]$b[3] + 1)
                     if ((([Math]::Abs($tx - $x)) + ([Math]::Abs($ty - $y))) -gt ($script:form.Width * 1.5)) { break }
                 }
                 $script:planeTarget = [System.Drawing.PointF]::new([float]$tx, [float]$ty)
             }
+            # Flies like a propeller plane: always nose first at a steady airspeed (never backwards, never
+            # hanging still), climbs and descends at a gentle angle, and turns round by easing off and
+            # pulling the nose up before flying back the other way.
             $dx = [double]$script:planeTarget.X - $x
             $dy = [double]$script:planeTarget.Y - $y
             $d = [Math]::Sqrt($dx * $dx + $dy * $dy)
             $speed = 6.0 * $u * $script:flySpeed
             if ($called) { $speed = 9.0 * $u * [Math]::Max(1.0, $script:flySpeed) }
-            if ($d -gt 1) {
-                # Gentle turns: the speed changes a little at a time.
-                $script:planeVX += ($dx / $d * $speed - $script:planeVX) * 0.035 * $dt
-                $script:planeVY += ($dy / $d * $speed * 0.7 - $script:planeVY) * 0.035 * $dt
+            $w = [double]$script:form.Width
+            $minSpd = 2.5 * $u
+            $fdir = 1.0
+            if ($script:facingLeft) { $fdir = -1.0 }
+            $fwd = [Math]::Abs($script:planeVX)
+            if (($script:planeVX * $fdir) -le 0) { $fwd = $minSpd }
+            $edgeGap = if ($fdir -gt 0) { [double]$b[1] - $x } else { $x - [double]$b[0] }
+            if (-not $script:planeTurning) {
+                if ($edgeGap -lt ($w * 0.3 + $fwd * 14.0)) {
+                    # Close to the edge of the screen: turn round and pick somewhere new.
+                    $script:planeTurning = $true
+                    if (-not $called) { $script:planeTarget = $null }
+                } elseif (($dx * $fdir) -lt (-$w * 0.35) -and $script:planeTime -ge $script:planeTurnAfter) {
+                    $script:planeTurning = $true
+                }
             }
+            if ($script:planeTurning) {
+                $fwd += ($minSpd - $fwd) * [Math]::Min(1.0, 0.09 * $dt)
+                $vyWant = -2.4 * $u
+                if ($y -le ([double]$b[2] + $h * 0.2)) { $vyWant = 0.5 * $u }
+                $script:planeVY += ($vyWant - $script:planeVY) * [Math]::Min(1.0, 0.12 * $dt)
+                if ($fwd -le ($minSpd * 1.08)) {
+                    # Round the turn: now flying the other way.
+                    $fdir = -$fdir
+                    $script:facingLeft = ($fdir -lt 0)
+                    $script:planeTurning = $false
+                    $script:planeTurnAfter = $script:planeTime + 20.0
+                    $fwd = $minSpd
+                }
+            } else {
+                $fwd += ($speed - $fwd) * [Math]::Min(1.0, 0.035 * $dt)
+                $vyWant = 0.0
+                if ($d -gt 1) { $vyWant = $dy / $d * $speed }
+                $climbMax = 0.55 * $fwd
+                $vyWant = [Math]::Max(-$climbMax, [Math]::Min($climbMax, $vyWant))
+                $script:planeVY += ($vyWant - $script:planeVY) * [Math]::Min(1.0, 0.05 * $dt)
+            }
+            if ($fwd -lt $minSpd) { $fwd = $minSpd }
+            $script:planeVX = $fdir * $fwd
             $x = [Math]::Min([double]$b[1], [Math]::Max([double]$b[0], $x + $script:planeVX * $dt))
-            $y = [Math]::Min([double]$b[3], [Math]::Max([double]$b[2], $y + ($script:planeVY + 0.5 * [Math]::Sin($script:planeTime / 8.0)) * $dt))
-            if ($d -lt (40.0 * $u)) {
+            $ny = $y + ($script:planeVY + 0.5 * [Math]::Sin($script:planeTime / 8.0)) * $dt
+            if ($ny -le [double]$b[2] -and $script:planeVY -lt 0) { $script:planeVY = 0.0 }
+            if ($ny -ge [double]$b[3] -and $script:planeVY -gt 0) { $script:planeVY = 0.0 }
+            $y = [Math]::Min([double]$b[3], [Math]::Max([double]$b[2], $ny))
+            # Reached the spot, or just flew past it: on to the next one.
+            if ($null -eq $script:planeTarget) { $d = 1000000.0; $dx = 0.0 }
+            $passed = (-not $script:planeTurning) -and (($dx * $fdir) -lt 0) -and (($dx * $fdir) -gt (-$w * 0.35)) -and ([Math]::Abs($dy) -lt ($h * 0.6))
+            if ($passed) { $d = 0.0 }
+            if ($d -lt (60.0 * $u)) {
                 $script:planeTarget = $null
                 if ($called) {
                     $script:summonRunUntil = 0
@@ -6391,6 +6447,8 @@ try {
     $script:planeVX = 0.0
     $script:planeVY = 0.0
     $script:planeTarget = $null
+    $script:planeTurning = $false     # turning round (eases off, nose up, then flies back the other way)
+    $script:planeTurnAfter = 0.0      # no second turn for a moment after one (planeTime)
     $script:planeLandY = 0.0
     $script:planeStopTick = 0
     $script:planeReady = $false
