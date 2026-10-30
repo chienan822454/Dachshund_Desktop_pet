@@ -191,7 +191,7 @@ if (-not [string]::IsNullOrEmpty($UpdateMode)) {
     }
     exit 0
 }
-$script:appVersion = 'V1.33.0'
+$script:appVersion = 'V1.34.0'
 $script:appTitle = '臘腸狗桌寵 ' + $script:appVersion + '（旺旺）'
 try { $Host.UI.RawUI.WindowTitle = '旺旺（臘腸狗桌寵）- 關閉這個視窗會結束旺旺' } catch { }
 Add-Type -AssemblyName System.Windows.Forms
@@ -991,6 +991,8 @@ function Get-OutfitPicture([string]$fileName) {
 
 # Pictures for eating the jerky lying down (dachshund_3d_jeat_<name>.png). _w1/_w2 = the tail swished to each side,
 # _c1.._c3 = crumbs flying off the bite.
+# Bath pictures (always the plain dog: the clothes come off for the bath and go back on afterwards).
+$script:bathNames = @('bath_00', 'bath_01', 'bath_02', 'wet_00', 'wetshake_00', 'wetshake_01', 'wetshake_02', 'wetshake_03', 'fluffy_00')
 $script:jeatNames = @('carry', 'carry_w1', 'carry_w2', 'hold', 'hold_w1', 'hold_w2', 'sniff', 'lickj', 'gnaw', 'gnaw_w1', 'gnaw_w2', 'gnawr', 'gnawr_w1', 'gnawr_w2',
     'tug', 'tug2', 'snap', 'snap_c1', 'snap_c2', 'snap_c3', 'chew2', 'chew2_w1', 'chew2_w2', 'guard', 'pawshift', 'headdown', 'last', 'toss', 'catch', 'catch_w1', 'catch_w2',
     'catch_c1', 'catch_c2', 'catch_c3', 'chew', 'chew_w1', 'chew_w2', 'crumbs', 'lick', 'lick_w1', 'lick_w2', 'sigh', 'sigh_w1', 'sigh_w2', 'lieyawn', 'doze')
@@ -1230,6 +1232,10 @@ function Invoke-DogSound([string]$name, [double]$seconds) {
 function Invoke-ActSound([int]$t) {
     # Called every tick of an action: the chewing and lapping sounds at the right moments.
     switch ($script:dogAct) {
+        'bath' {
+            if ($t -eq 82 -or $t -eq 100) { Invoke-DogSound 'splash' 1.7 }
+            if ($t -eq 150) { Invoke-DogSound 'shakewater' 1.2 }
+        }
         'eat' { if ($t -eq 8 -or $t -eq 46) { Invoke-DogSound 'chew' 1.5 } }
         'drink' { if ($t -eq 5 -or $t -eq 30) { Invoke-DogSound 'lap' 1.7 } }
         'jerky' {
@@ -2180,6 +2186,7 @@ function Invoke-PlanePending($pend) {
         'rest' { Start-DogRest ([string]$pend.Name) ([string]$pend.Say) }
         'outfit' { Set-DogOutfit ([string]$pend.Name) }
         'behind' { Start-DogBehind ([int]$pend.Name) }
+        'bath' { Start-DogBath }
     }
 }
 
@@ -4797,7 +4804,7 @@ function Invoke-DogWelcome {
         if ($script:dogNightSleep -or $script:dogActLen -eq 0) { return }
         Stop-DogSleep $false
     }
-    if ($script:dogAct -ne 'plane') {
+    if ($script:dogAct -ne 'plane' -and $script:dogAct -ne 'bath') {
         $script:dogAct = ''
         $script:actionMode = 'happy'
         $script:actionTick = 0
@@ -4970,7 +4977,7 @@ function Start-CircleChase {
     if ($script:clockTick -lt $script:circleChaseUntil) { return }
     if ($script:dogSleeping -and ($script:dogNightSleep -or $script:dogActLen -eq 0)) { return }
     if ($script:dogAct -eq 'eat' -or $script:dogAct -eq 'drink' -or $script:dogAct -eq 'fling' -or $script:dogAct -eq 'spin' -or
-        $script:dogAct -eq 'paw' -or $script:dogAct -eq 'playdead' -or $script:dogAct -eq 'fetch' -or $script:dogAct -eq 'jerky' -or $script:dogAct -eq 'burst' -or $script:dogAct -eq 'plane') { return }
+        $script:dogAct -eq 'paw' -or $script:dogAct -eq 'playdead' -or $script:dogAct -eq 'fetch' -or $script:dogAct -eq 'jerky' -or $script:dogAct -eq 'burst' -or $script:dogAct -eq 'plane' -or $script:dogAct -eq 'bath') { return }
     if ($script:dogSleeping) { Stop-DogSleep $false }
     $script:dogAct = ''
     $script:lastInteractTick = $script:clockTick
@@ -5833,6 +5840,44 @@ function Get-FetchTarget {
     return @($tx, $ty, $faceLeft)
 }
 
+function Start-DogBath {
+    # 洗澡: clothes off, a bubble bath in the wooden tub, scrubbing, a rinse, dripping wet, a big shake that sprays
+    # water drops, then fluffy and happy - and the clothes go back on.
+    if (Request-PlaneLandFirst @{ Kind = 'bath' }) { return }
+    foreach ($bn in $script:bathNames) {
+        if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot ('dachshund_3d_' + $bn + '.png')))) { Set-Bubble '找不到洗澡的圖片'; return }
+    }
+    if ($script:dogAct -eq 'bath') { Set-Bubble '正在洗澎澎～'; return }
+    if ($script:dogAct -eq 'jerky' -or $script:dogAct -eq 'snatch' -or $script:dogAct -eq 'eat' -or $script:dogAct -eq 'drink') { Set-Bubble '等我吃完再洗～'; return }
+    if ($script:jerkyState -eq 'hold') { Stop-JerkyHold }
+    if ($script:dogSleeping) { Stop-DogSleep $false }
+    $script:begging = $false
+    $script:roamTarget = $null
+    $script:roamMoving = $false
+    $script:actionMode = 'idle'
+    $script:actionTick = 0
+    $script:dogAct = 'bath'
+    $script:dogActTick = 0
+    $script:dogActLen = 250
+    $script:lastInteractTick = $script:clockTick
+    if ([string]::IsNullOrEmpty($script:outfitDir)) { Set-Bubble '要洗澎澎囉！' } else { Set-Bubble '先把衣服脫下來～要洗澎澎囉！' }
+}
+
+function Get-BathFramePath([int]$t) {
+    $n = 'fluffy_00'
+    if ($t -lt 80) {
+        $n = 'bath_00'
+        if ($t -ge 8 -and ([int][Math]::Floor($t / 5) % 2) -eq 1) { $n = 'bath_01' }
+    } elseif ($t -lt 120) {
+        $n = 'bath_02'
+    } elseif ($t -lt 150) {
+        $n = 'wet_00'
+    } elseif ($t -lt 178) {
+        $n = 'wetshake_0' + [string]([int][Math]::Floor(($t - 150) / 2) % 4)
+    }
+    return (Join-Path $PSScriptRoot ('dachshund_3d_' + $n + '.png'))
+}
+
 function Start-RandomDogAction {
     # Weighted pick among the actions whose pictures are present.
     $pool = @(@('tilt', 22), @('sniff', 22), @('look', 16), @('shake', 14), @('sit', 12), @('lie', 10), @('bow', 6), @('yawn', 6))
@@ -6012,6 +6057,9 @@ function Get-DogFramePath {
     }
     $t = $script:dogActTick
     switch ($script:dogAct) {
+        'bath' {
+            return Get-BathFramePath $t
+        }
         'tilt' {
             if ($t -ge 2 -and $t -lt ($script:dogActLen - 3)) { return $script:dogPoses[$script:dogActPose] }
             return $null
@@ -6741,6 +6789,8 @@ try {
         try { Start-JerkyThrow } catch { $null = Write-ErrorLog ('丟肉乾錯誤：' + $_.ToString()); try { Hide-Jerky } catch { } }
     })
     [void]$cms.Items.Add($miJerky)
+    $miBath = New-Object System.Windows.Forms.ToolStripMenuItem('洗澡')
+    $miBath.Add_Click({ try { Start-DogBath } catch { $null = Write-ErrorLog ('洗澡錯誤：' + $_.ToString()); if ($script:dogAct -eq 'bath') { $script:dogAct = '' } } })
     $miClean = New-Object System.Windows.Forms.ToolStripMenuItem('清潔（拿掃把掃大便）')
     $miClean.Add_Click({ try { Start-CleanMode } catch { $null = Write-ErrorLog ('清潔錯誤：' + $_.ToString()); Set-Bubble '掃把拿不起來…再試一次～'; try { Stop-CleanMode } catch { } } })
     [void]$cms.Items.Add($miClean)
@@ -7378,6 +7428,7 @@ try {
     Set-MenuLook $script:miLand '' '飛機降落到畫面下方，停好後變回原本的衣服' 0x1F6EC 40 120 200
     Set-MenuLook $miCare '' '' 0x1F43E 150 100 60
     Set-MenuLook $miWater '' '碗裡換成水，旺旺舔水喝' 0x1F4A7 40 140 220
+    Set-MenuLook $miBath '' '脫掉衣服洗泡泡澡、沖水、甩乾，洗好毛蓬蓬的再穿回衣服' 0x1F6C1 40 140 220
     Set-MenuLook $miClean '清潔' '滑鼠變成掃把，點大便把它掃掉（右鍵或 Esc 結束）' 0x1F9F9 150 110 60
     Set-MenuLook $miMoves '' '' 0x1F415 150 100 60
     Set-MenuLook $miGo '' '' 0x1F6B6 80 130 80
@@ -7404,7 +7455,7 @@ try {
     foreach ($it in @($script:miMood, (New-Object System.Windows.Forms.ToolStripSeparator), $miFeed, $miJerky, $miOutfit, $miSleep, $miWake, $script:miStopRing, $miFly, $script:miLand,
             (New-Object System.Windows.Forms.ToolStripSeparator), $miCare, $miMoves, $miGo, $miHide, $miTime, $miSet,
             (New-Object System.Windows.Forms.ToolStripSeparator), $miAboutRoot, $miClose)) { [void]$cms.Items.Add($it) }
-    foreach ($it in @($miWater, $miClean)) { [void]$miCare.DropDownItems.Add($it) }
+    foreach ($it in @($miWater, $miBath, $miClean)) { [void]$miCare.DropDownItems.Add($it) }
     foreach ($it in @($miActions, $miTricks)) { [void]$miMoves.DropDownItems.Add($it) }
     foreach ($it in @($miRoam, $miRoamSpeed, $miChase, (New-Object System.Windows.Forms.ToolStripSeparator), $miGravity,
             (New-Object System.Windows.Forms.ToolStripSeparator), $miSpeedFly, $script:miBanner)) { [void]$miGo.DropDownItems.Add($it) }
@@ -7545,6 +7596,11 @@ try {
         if ($script:dogAct -eq 'jerky' -or $script:dogAct -eq 'fetch' -or $script:dogAct -eq 'snatch') {
             # Going for the jerky or eating it: a click does not stop it.
             if ($script:dogAct -eq 'jerky') { Set-Bubble '吃肉乾中～等我吃完！' } else { Set-Bubble '等等～我要去吃肉乾！' }
+            return
+        }
+        if ($script:dogAct -eq 'bath') {
+            # In the bath: a click does not stop it halfway.
+            if ($script:dogActTick -lt 120) { Set-Bubble '洗澎澎中～等我洗好！' } else { Set-Bubble '快好了～再等一下！' }
             return
         }
         if ($script:dogAct -eq 'eat' -or $script:dogAct -eq 'drink') {
@@ -7716,7 +7772,7 @@ try {
 
             # 3) Actions: tilting, sniffing, shaking, lying, sleeping, petting
             # A pat or a bark takes over from a small action (not from sleeping or petting).
-            if ($script:dogAct -ne '' -and $script:dogAct -ne 'sleep' -and $script:dogAct -ne 'pet' -and $script:dogAct -ne 'headpat' -and $script:dogAct -ne 'plane' -and $script:actionMode -ne 'idle') { $script:dogAct = '' }
+            if ($script:dogAct -ne '' -and $script:dogAct -ne 'sleep' -and $script:dogAct -ne 'pet' -and $script:dogAct -ne 'headpat' -and $script:dogAct -ne 'plane' -and $script:dogAct -ne 'bath' -and $script:actionMode -ne 'idle') { $script:dogAct = '' }
             # 飛行模式: back in the air after anything else it did.
             if ($script:flyMode -and $script:dogAct -eq '' -and -not $script:isDragging -and $script:actionMode -eq 'idle') {
                 if ($script:planeReady) { Start-PlaneFlight 'cruise' '' } else { $script:flyMode = $false; try { $script:miFly.Checked = $false } catch { } }
@@ -7726,6 +7782,22 @@ try {
                 $t = $script:dogActTick
                 if ($script:dogSounds) { try { Invoke-ActSound $t } catch { } }
                 switch ($script:dogAct) {
+                    'bath' {
+                        $xOffset = 0
+                        $yOffset = 0
+                        if ($t -ge 8 -and $t -lt 80) { $xOffset = @(0, 2, 0, -2)[$t % 4] }
+                        if ($t -ge 150 -and $t -lt 178) { $xOffset = @(-3, 3)[$t % 2] }
+                        if ($t -ge 178 -and $t -lt 196) { $yOffset = [int]([Math]::Abs([Math]::Sin(($t - 178) / 2.0)) * -12) }
+                        if ($t -eq 12) { Set-Bubble '搓搓搓～泡泡好多！' }
+                        if ($t -eq 48) { Set-Bubble ([string](@('好舒服～', '背背也要洗～', '泡泡跑到鼻子上了！')[$script:rng.Next(0, 3)])) }
+                        if ($t -eq 82) { Set-Bubble '沖水囉～眼睛閉起來！' }
+                        if ($t -eq 122) { Set-Bubble '濕答答的…' }
+                        if ($t -eq 150) { Set-Bubble '甩甩甩～水噴出來了！' }
+                        if ($t -eq 180) {
+                            Add-DogMood 2
+                            if ([string]::IsNullOrEmpty($script:outfitDir)) { Set-Bubble '香香的、毛蓬蓬的～♥' } else { Set-Bubble '香香的、毛蓬蓬的～衣服穿回去囉♥' }
+                        }
+                    }
                     'poop' {
                         $xOffset = 0
                         $yOffset = 0
@@ -8136,7 +8208,7 @@ try {
             }
             if ($script:hovering -and -not $script:isDragging -and -not $menuOpen) {
                 $script:hoverTicks++
-                $petOk = (-not $script:dogSleeping -and $script:dogAct -ne 'eat' -and $script:dogAct -ne 'drink' -and $script:dogAct -ne 'fling' -and $script:dogAct -ne 'tease' -and $script:dogAct -ne 'fetch' -and $script:dogAct -ne 'jerky' -and $script:dogAct -ne 'snatch' -and $script:dogAct -ne 'burst' -and $script:dogAct -ne 'plane' -and -not $script:alarmRinging)
+                $petOk = (-not $script:dogSleeping -and $script:dogAct -ne 'eat' -and $script:dogAct -ne 'drink' -and $script:dogAct -ne 'fling' -and $script:dogAct -ne 'tease' -and $script:dogAct -ne 'fetch' -and $script:dogAct -ne 'jerky' -and $script:dogAct -ne 'snatch' -and $script:dogAct -ne 'burst' -and $script:dogAct -ne 'plane' -and $script:dogAct -ne 'bath' -and -not $script:alarmRinging)
                 if ($petOk -and $script:headPatEnabled -and $script:hoverTicks -ge 14 -and $script:dogAct -ne 'headpat' -and $script:dogAct -ne 'pet' -and $script:actionMode -eq 'idle' -and (Test-PointerOnHead)) {
                     Start-DogAction 'headpat' '*'
                 } elseif ($script:hoverTicks -eq 25 -and $petOk -and $script:dogAct -ne 'headpat') { Start-DogAction 'pet' '*' }
