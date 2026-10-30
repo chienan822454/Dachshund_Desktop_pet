@@ -191,7 +191,7 @@ if (-not [string]::IsNullOrEmpty($UpdateMode)) {
     }
     exit 0
 }
-$script:appVersion = 'V1.32.1'
+$script:appVersion = 'V1.33.0'
 $script:appTitle = '臘腸狗桌寵 ' + $script:appVersion + '（旺旺）'
 try { $Host.UI.RawUI.WindowTitle = '旺旺（臘腸狗桌寵）- 關閉這個視窗會結束旺旺' } catch { }
 Add-Type -AssemblyName System.Windows.Forms
@@ -5558,13 +5558,14 @@ function Get-JerkyHandCursor {
 
 function Start-JerkyThrow {
     # 丟肉乾: the pointer picks up a jerky. 旺旺 chases it; catching the pointer = it snatches the jerky and eats it
-    # a little way off. A click throws it the way the pointer is moving (a still pointer just lets it drop).
+    # a little way off. Press the left button to grip it, swing, and let go: it flies off with the hand's speed
+    # and direction at the moment of letting go (a hand that has stopped just lets it drop).
     if (Request-PlaneLandFirst @{ Kind = 'jerky' }) { return }
     if (-not (Test-DogAction 'jerky')) { Set-Bubble '這件衣服還沒有吃肉乾的圖片，換別件或脫掉衣服再試試～'; return }
     if (-not (Test-Path -LiteralPath $script:jerkyPath)) { Set-Bubble '找不到肉乾的圖片（jerky.png）'; return }
     if ($script:dogAct -eq 'jerky' -or $script:dogAct -eq 'snatch') { Set-Bubble '我還在吃上一片～等一下！'; return }
     if ($script:dogAct -eq 'burst') { return }
-    if ($script:jerkyState -eq 'hold') { Set-Bubble '肉乾已經在你手上了～點一下丟出去！'; return }
+    if ($script:jerkyState -eq 'hold') { Set-Bubble '肉乾已經在你手上了～按住左鍵甩一下，放開就丟出去！'; return }
     if ($script:jerkyState -ne '') { Hide-Jerky }
     Initialize-JerkyWindow
     Stop-CleanMode
@@ -5587,14 +5588,35 @@ function Start-JerkyThrow {
         param($sender, $e)
         try {
             if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Right) { Stop-JerkyHold; Hide-Jerky; if ($script:dogAct -eq 'fetch') { $script:dogAct = '' }; Set-Bubble '好～肉乾先收起來'; return }
-            if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) { Invoke-JerkyThrowFromHand }
+            if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
+                # Pressed: the hand grips the jerky (nothing is thrown yet); 旺旺 stops and watches.
+                $script:jerkyGrip = $true
+                Add-JerkyTrailPoint
+                Set-Bubble '（盯——）要丟了嗎？要丟了嗎？'
+            }
         } catch { $null = Write-ErrorLog ('丟肉乾錯誤：' + $_.ToString()); Stop-JerkyHold; Hide-Jerky }
+    })
+    $hf.Add_MouseMove({
+        param($sender, $e)
+        try { Add-JerkyTrailPoint } catch { }
+    })
+    $hf.Add_MouseUp({
+        param($sender, $e)
+        try {
+            if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left -and $script:jerkyGrip) {
+                # Let go: the jerky leaves the hand with the speed and direction the hand had at that moment.
+                $script:jerkyGrip = $false
+                Add-JerkyTrailPoint
+                Invoke-JerkyThrowFromHand
+            }
+        } catch { $null = Write-ErrorLog ('丟肉乾錯誤：' + $_.ToString()); $script:jerkyGrip = $false; Stop-JerkyHold; Hide-Jerky }
     })
     $hf.Add_KeyDown({
         param($sender, $e)
         if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Escape) { Stop-JerkyHold; Hide-Jerky; if ($script:dogAct -eq 'fetch') { $script:dogAct = '' }; Set-Bubble '好～肉乾先收起來' }
     })
     $script:jerkyHoldForm = $hf
+    $script:jerkyGrip = $false
     $script:jerkyTrail.Clear()
     $script:jerkyState = 'hold'
     $script:jerkyTicks = 0
@@ -5614,11 +5636,21 @@ function Start-JerkyThrow {
     $script:dogActLen = 0
     $script:fetchMoving = $false
     $script:lastInteractTick = $script:clockTick
-    Set-Bubble '肉乾！肉乾！（點一下丟出去，被我追到就搶走囉～右鍵或 Esc 收起來）'
+    Set-Bubble '肉乾！肉乾！（按住左鍵甩一下、放開就丟出去；被我追到就搶走囉～右鍵或 Esc 收起來）'
+}
+
+function Add-JerkyTrailPoint {
+    # Where the hand is now (newest first; only the last quarter of a second is kept) - for the speed when letting go.
+    $cur = [System.Windows.Forms.Cursor]::Position
+    $now = [Environment]::TickCount
+    [void]$script:jerkyTrail.Insert(0, @($now, $cur.X, $cur.Y))
+    while ($script:jerkyTrail.Count -gt 2 -and ($now - [int]$script:jerkyTrail[$script:jerkyTrail.Count - 1][0]) -gt 250) { $script:jerkyTrail.RemoveAt($script:jerkyTrail.Count - 1) }
+    while ($script:jerkyTrail.Count -gt 60) { $script:jerkyTrail.RemoveAt($script:jerkyTrail.Count - 1) }
 }
 
 function Stop-JerkyHold {
     # The pointer goes back to normal (the see-through cover is closed).
+    $script:jerkyGrip = $false
     $hf = $script:jerkyHoldForm
     $script:jerkyHoldForm = $null
     if ($script:jerkyState -eq 'hold') { $script:jerkyState = '' }
@@ -5631,19 +5663,26 @@ function Invoke-JerkyThrowFromHand {
     $now = [Environment]::TickCount
     $vx = 0.0
     $vy = 0.0
+    # The hand's speed just before letting go: from the newest point back to one about 70 ms older.
+    $ref = $null
     foreach ($tr in $script:jerkyTrail) {
         $age = $now - [int]$tr[0]
-        if ($age -ge 30 -and $age -le 180) {
-            $vx = ([double]$cur.X - [double]$tr[1]) / $age * 60.0
-            $vy = ([double]$cur.Y - [double]$tr[2]) / $age * 60.0
-            break
+        if ($age -gt 120) { break }
+        $ref = $tr
+        if ($age -ge 70) { break }
+    }
+    if ($null -ne $ref) {
+        $age = [double]($now - [int]$ref[0])
+        if ($age -ge 15) {
+            $vx = ([double]$cur.X - [double]$ref[1]) / $age * 60.0
+            $vy = ([double]$cur.Y - [double]$ref[2]) / $age * 60.0
         }
     }
     $dpi = [double]$script:dpiScale
-    $vx = $vx * 0.55
-    $vy = $vy * 0.55
+    $vx = $vx * 0.8
+    $vy = $vy * 0.8
     $sp = [Math]::Sqrt($vx * $vx + $vy * $vy)
-    $max = 26.0 * $dpi
+    $max = 60.0 * $dpi
     if ($sp -gt $max) { $vx = $vx * $max / $sp; $vy = $vy * $max / $sp; $sp = $max }
     $dropped = ($sp -lt (2.5 * $dpi))
     if ($dropped) { $vx = 0.0; $vy = 0.0 }
@@ -5700,9 +5739,13 @@ function Update-Jerky([bool]$menuOpen) {
     $script:jerkyTicks++
     if ($script:jerkyState -eq 'hold') {
         # The pointer holds the jerky: remember where it was (for the throw); 旺旺 keeps chasing it.
-        $cur = [System.Windows.Forms.Cursor]::Position
-        [void]$script:jerkyTrail.Insert(0, @([Environment]::TickCount, $cur.X, $cur.Y))
-        while ($script:jerkyTrail.Count -gt 10) { $script:jerkyTrail.RemoveAt($script:jerkyTrail.Count - 1) }
+        Add-JerkyTrailPoint
+        if ($null -ne $script:jerkyHoldForm -and $script:jerkyGrip -and [System.Windows.Forms.Control]::MouseButtons -ne [System.Windows.Forms.MouseButtons]::Left) {
+            # The button was let go somewhere the cover did not see (another window took it): throw now.
+            $script:jerkyGrip = $false
+            Invoke-JerkyThrowFromHand
+            return
+        }
         if ($null -eq $script:jerkyHoldForm) { $script:jerkyState = ''; return }
         if ($script:dogAct -eq '' -and $script:actionMode -eq 'idle' -and -not $script:isDragging -and -not $script:dogSleeping) {
             $script:dogAct = 'fetch'
@@ -6309,6 +6352,7 @@ try {
     $script:jerkyHoldForm = $null     # 丟肉乾: the see-through cover while the pointer holds the jerky
     $script:jerkyHandCursor = $null
     $script:jerkyTrail = New-Object System.Collections.ArrayList
+    $script:jerkyGrip = $false
     $script:snatchTarget = 0.0
     $script:miFlySpeed = @()
     $script:planeTrickTick = 0.0
@@ -7809,7 +7853,12 @@ try {
                                 $fdy = $ty - $script:baseLocation.Y
                                 $fdist = [Math]::Sqrt($fdx * $fdx + $fdy * $fdy)
                                 $fstep = [Math]::Max($script:roamSpeed, 5.0) * 1.2 * $script:dpiScale * $script:sizeRatio
-                                if ($fdist -gt 2) {
+                                if ($script:jerkyGrip) {
+                                    # You are about to throw: 旺旺 stops and watches the hand, ready to run.
+                                    $script:facingLeft = $wantLeft
+                                    $script:fetchMoving = $false
+                                    $t = 0
+                                } elseif ($fdist -gt 2) {
                                     if ([Math]::Abs($fdx) -gt 4) { $script:facingLeft = $wantLeft }
                                     $k = [Math]::Min(1.0, $fstep / $fdist)
                                     $script:baseLocation = [System.Drawing.Point]::new([int][Math]::Round($script:baseLocation.X + $fdx * $k), [int][Math]::Round($script:baseLocation.Y + $fdy * $k))
@@ -7818,7 +7867,7 @@ try {
                                 }
                                 $mx = [double]$script:baseLocation.X + $mouthX - $jx
                                 $my = [double]$script:baseLocation.Y + $mouthY - $jy
-                                if ([Math]::Sqrt($mx * $mx + $my * $my) -lt ($fw * 0.13) -and $t -gt 15) {
+                                if (-not $script:jerkyGrip -and [Math]::Sqrt($mx * $mx + $my * $my) -lt ($fw * 0.13) -and $t -gt 15) {
                                     Start-JerkySnatch
                                     $t = 0
                                 }
