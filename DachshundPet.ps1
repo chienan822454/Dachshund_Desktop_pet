@@ -191,7 +191,7 @@ if (-not [string]::IsNullOrEmpty($UpdateMode)) {
     }
     exit 0
 }
-$script:appVersion = 'V1.32.0'
+$script:appVersion = 'V1.32.1'
 $script:appTitle = '臘腸狗桌寵 ' + $script:appVersion + '（旺旺）'
 try { $Host.UI.RawUI.WindowTitle = '旺旺（臘腸狗桌寵）- 關閉這個視窗會結束旺旺' } catch { }
 Add-Type -AssemblyName System.Windows.Forms
@@ -2237,6 +2237,27 @@ function Start-PlaneTrick {
     }
 }
 
+function Invoke-PlanePat([bool]$wasPat) {
+    # A click on the plane: a happy little hop up and a word (the plane, outfit and propeller stay as they are).
+    # Two quick clicks while cruising: a loop the loop or a climb and dive.
+    $nowMs = [Environment]::TickCount
+    $sinceMs = $nowMs - $script:lastClickMs
+    $script:lastClickMs = $nowMs
+    $script:lastInteractTick = $script:clockTick
+    if ($wasPat -and $sinceMs -ge 0 -and $sinceMs -le [System.Windows.Forms.SystemInformation]::DoubleClickTime -and $script:planePhase -eq 'cruise') {
+        $script:lastClickPat = $false
+        Start-PlaneTrick
+        return
+    }
+    $script:lastClickPat = $true
+    if ($script:planePhase -eq 'cruise' -or $script:planePhase -eq 'glide') {
+        $u = Get-PlaneUnit
+        $script:planeVY = [Math]::Min($script:planeVY, -2.2 * $u)
+    }
+    $lines = @('汪！飛高高～', '嘿嘿～看我開飛機！', '汪汪！抓穩囉～', '再摸一下～咻！')
+    Set-Bubble $lines[$script:rng.Next(0, $lines.Count)]
+}
+
 function Update-PlaneFlight {
     if ($script:isDragging) { return }
     $u = Get-PlaneUnit
@@ -4018,7 +4039,7 @@ function Step-AlarmRing([DateTime]$now) {
     $script:alarmNextBark = $now.AddSeconds($script:barkSeconds + 1.4)
     $script:lastInteractTick = $script:clockTick
     Set-Bubble ('汪汪！' + $script:alarmRingNote + '（點我停止）')
-    if (-not $script:isDragging) {
+    if (-not $script:isDragging -and $script:dogAct -ne 'plane') {
         if ($script:dogSleeping) { Stop-DogSleep $false }
         $script:dogAct = ''
         $script:actionMode = 'happy'
@@ -4776,9 +4797,11 @@ function Invoke-DogWelcome {
         if ($script:dogNightSleep -or $script:dogActLen -eq 0) { return }
         Stop-DogSleep $false
     }
-    $script:dogAct = ''
-    $script:actionMode = 'happy'
-    $script:actionTick = 0
+    if ($script:dogAct -ne 'plane') {
+        $script:dogAct = ''
+        $script:actionMode = 'happy'
+        $script:actionTick = 0
+    }
     $script:lastInteractTick = $script:clockTick
     $lines = @('你回來了！汪汪！', '汪！等你好久了～', '你回來了～陪旺旺玩！')
     Set-Bubble ([string]$lines[$script:rng.Next(0, $lines.Count)])
@@ -4844,6 +4867,7 @@ function Set-DogPounceTarget {
 
 function Update-DogTease {
     # The mouse pointer swinging quickly left and right in front of the dachshund (4 swings in a row).
+    if ($script:dogAct -eq 'plane') { $script:teaseFlips = 0; $script:teaseDir = 0; return }
     $cur = [System.Windows.Forms.Cursor]::Position
     $w = [double]$script:form.Width
     $left = [double]$script:baseLocation.X
@@ -4946,7 +4970,7 @@ function Start-CircleChase {
     if ($script:clockTick -lt $script:circleChaseUntil) { return }
     if ($script:dogSleeping -and ($script:dogNightSleep -or $script:dogActLen -eq 0)) { return }
     if ($script:dogAct -eq 'eat' -or $script:dogAct -eq 'drink' -or $script:dogAct -eq 'fling' -or $script:dogAct -eq 'spin' -or
-        $script:dogAct -eq 'paw' -or $script:dogAct -eq 'playdead' -or $script:dogAct -eq 'fetch' -or $script:dogAct -eq 'jerky' -or $script:dogAct -eq 'burst') { return }
+        $script:dogAct -eq 'paw' -or $script:dogAct -eq 'playdead' -or $script:dogAct -eq 'fetch' -or $script:dogAct -eq 'jerky' -or $script:dogAct -eq 'burst' -or $script:dogAct -eq 'plane') { return }
     if ($script:dogSleeping) { Stop-DogSleep $false }
     $script:dogAct = ''
     $script:lastInteractTick = $script:clockTick
@@ -6855,7 +6879,7 @@ try {
         try {
             if (Invoke-BarkSound) {
                 Set-Bubble '汪汪！'
-                if (-not $script:dogSleeping) { $script:dogAct = ''; $script:actionMode = 'happy'; $script:actionTick = 0 }
+                if (-not $script:dogSleeping -and $script:dogAct -ne 'plane') { $script:dogAct = ''; $script:actionMode = 'happy'; $script:actionTick = 0 }
             } else {
                 Set-Bubble '找不到叫聲檔案（sounds 資料夾裡的 wangwang_bark.wav）'
             }
@@ -7378,8 +7402,12 @@ try {
             $script:dogSleeping = $false
             $script:bellyRubTicks = 0
             $script:dogNightSleep = $false
-            $script:dogAct = ''
-            Set-Bubble '汪！放旺旺下來～'
+            if ($script:dogAct -eq 'plane') {
+                Set-Bubble '汪！抓住飛機了～'
+            } else {
+                $script:dogAct = ''
+                Set-Bubble '汪！放旺旺下來～'
+            }
         }
         $script:dragMoved = $true
         # The last moments of the drag (to know how fast it is let go).
@@ -7443,6 +7471,12 @@ try {
             # Put down: shakes itself, rests about 6 seconds, then walks again.
             $script:roamPauseTicks = 100
             try { Start-DogAction 'shake' '甩甩～' } catch { }
+            return
+        }
+        if ($script:dogAct -eq 'plane') {
+            # Flying: a click never takes 旺旺 out of the plane.
+            if ($stoppedAlarm) { Set-Bubble '好～知道了！汪！'; return }
+            Invoke-PlanePat $wasPat
             return
         }
         if ($stoppedAlarm) {
