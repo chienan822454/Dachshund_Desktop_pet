@@ -191,7 +191,7 @@ if (-not [string]::IsNullOrEmpty($UpdateMode)) {
     }
     exit 0
 }
-$script:appVersion = 'V1.34.1'
+$script:appVersion = 'V1.35.0'
 $script:appTitle = '臘腸狗桌寵 ' + $script:appVersion + '（旺旺）'
 try { $Host.UI.RawUI.WindowTitle = '旺旺（臘腸狗桌寵）- 關閉這個視窗會結束旺旺' } catch { }
 Add-Type -AssemblyName System.Windows.Forms
@@ -1902,6 +1902,13 @@ function Import-DogPictures {
             'run_00', 'run_01', 'fall_00', 'rub_00', 'paw_00', 'jerky_00', 'jerky_01')) {
         $pp = Get-OutfitPicture ('dachshund_3d_' + $pn + '.png')
         if ($null -ne $pp) { $script:dogPoses[$pn] = $pp }
+    }
+    # Picked up by the scruff (held_00/01, the legs kicking): the outfit's own pictures, or the plain ones without
+    # clothes; otherwise it paddles its legs with the walking pictures as before.
+    foreach ($hn in @('held_00', 'held_01')) {
+        $hp = $null
+        if ([string]::IsNullOrEmpty($script:outfitDir)) { $hp = Join-Path $PSScriptRoot ('dachshund_3d_' + $hn + '.png') } else { $hp = Join-Path $script:outfitDir ('dachshund_3d_' + $hn + '.png') }
+        if (Test-Path -LiteralPath $hp) { $script:dogPoses[$hn] = $hp }
     }
     # Squatting for a poop (poop_00): the outfit's own picture, or the plain one without clothes; otherwise it sits.
     $poopPic = $null
@@ -5415,6 +5422,7 @@ $script:dogActionSpec = @{
     tease = @{ Len = 70;  Poses = @('tilt_00', 'tilt_01', 'bow_00'); Say = @('咦？那是什麼？', '嗯？要跟我玩嗎？') }
     paw   = @{ Len = 74;  Poses = @('sit_00', 'paw_00');      Say = @('握手！汪！', '給你我的手手～', '握握手～好朋友！') }
     playdead = @{ Len = 110; Poses = @('lie_00', 'belly_00'); Say = @('翻肚肚～', '看我的肚子～', '旺旺翻肚了～') }
+    rollover = @{ Len = 150; Poses = @('lie_00', 'belly_00', 'rub_00'); Say = @('翻肚肚～摸這裡！', '肚肚給你摸～♥', '嘿嘿～摸肚子！') }
     jerky = @{ Len = 84;  Poses = @('jerky_00', 'jerky_01');  Say = @('肉乾！我的！', '咬到了～', '好香的肉乾！') }
     fetch = @{ Len = 0;   Poses = @();                        Say = @('肉乾！我來了～') }
     poop  = @{ Len = 84;  Poses = @('sniff_00', 'sniff_01', 'poop_00'); Say = @('') }
@@ -5896,6 +5904,42 @@ function Get-FetchTarget {
     return @($tx, $ty, $faceLeft)
 }
 
+function Add-DogPat {
+    # Counts pats close together (clicks, or petting with the pointer resting on it). The fifth one in a row:
+    # 旺旺 is so happy it rolls over belly up for a belly rub. Returns $true when it rolled over.
+    $now = $script:clockTick
+    if (($now - $script:patLastTick) -le 55) { $script:patCount++ } else { $script:patCount = 1 }
+    $script:patLastTick = $now
+    if ($script:patCount -lt 5 -or -not (Test-DogAction 'rollover')) { return $false }
+    if ($script:dogSleeping -or $script:dogAct -eq 'plane' -or $script:dogAct -eq 'bath' -or $script:dogAct -eq 'fling') { return $false }
+    $script:patCount = 0
+    $script:actionMode = 'idle'
+    $script:actionTick = 0
+    $script:roamTarget = $null
+    $script:roamMoving = $false
+    $script:rollRubs = 0
+    Start-DogAction 'rollover' '*'
+    Add-DogMood 2
+    return $true
+}
+
+function Invoke-RolloverRub {
+    # A click while lying belly up: a belly rub - wriggles happily and stays belly up a little longer.
+    $t = $script:dogActTick
+    $script:lastInteractTick = $script:clockTick
+    if ($t -lt 15) { return }
+    if ($t -lt 130 -and $script:rollRubs -lt 6) {
+        $script:rollRubs++
+        $script:dogActTick = [Math]::Max(15, $t - 40)
+        $lines = @('嘿嘿～好癢喔～', '肚肚好舒服～♥', '再摸摸～再摸摸～', '旺旺最喜歡摸肚子了～♥')
+        Set-Bubble ([string]$lines[$script:rng.Next(0, $lines.Count)])
+        if ($script:rollRubs -eq 1) { Add-DogMood 1 }
+    } elseif ($t -lt 130) {
+        Set-Bubble '摸好久了～我要起來囉！'
+        $script:dogActTick = 130
+    }
+}
+
 function Start-DogBath {
     # 洗澡: clothes off, a bubble bath in the wooden tub, scrubbing, a rinse, dripping wet, a big shake that sprays
     # water drops, then fluffy and happy - and the clothes go back on.
@@ -6102,12 +6146,29 @@ function Invoke-DogHover {
     if ($script:dogAct -eq '' -and $script:actionMode -eq 'idle' -and (Test-DogAction 'tilt')) { Start-DogAction 'tilt' '汪？' }
 }
 
+function Test-HeldFrames {
+    return ($script:dogPoses.ContainsKey('held_00') -and $script:dogPoses.ContainsKey('held_01'))
+}
+
+function Get-HeldGrabOffset {
+    # Where the scruff is in the window (the point under the mouse pointer while it hangs): @(x, y).
+    $k = [double]$script:form.Width / 768.0
+    $gx = 406.0
+    if ($script:facingLeft) { $gx = 768.0 - $gx }
+    return @(($gx * $k), (122.0 * $k))
+}
+
 function Get-DogFramePath {
     # Picture for the dachshund this tick, or $null for the normal standing tail wag.
     $walkSeq = @(1, 0, 1, 2, 3, 2)
     if ($script:isDragging -and $script:dragMoved) {
         # Picked up: the legs paddle in the air (in the plane: still the plane).
         if ($script:dogAct -eq 'plane') { return Get-PlaneFramePath }
+        if (Test-HeldFrames) {
+            # Hanging by the scruff, the little legs kicking in the air.
+            if (([int][Math]::Floor($script:clockTick / 4) % 2) -eq 0) { return $script:dogPoses['held_00'] }
+            return $script:dogPoses['held_01']
+        }
         if ($script:dogWalkFrames.Count -eq 4) { return $script:dogWalkFrames[$walkSeq[$script:clockTick % 6]] }
         return $null
     }
@@ -6115,6 +6176,20 @@ function Get-DogFramePath {
     switch ($script:dogAct) {
         'bath' {
             return Get-BathFramePath $t
+        }
+        'rollover' {
+            # So happy after lots of pats: drops down, rolls over belly up and wriggles, then gets up again.
+            if ($t -lt 4 -and $script:dogPoses.ContainsKey('crouch_00')) { return $script:dogPoses['crouch_00'] }
+            if ($t -lt 9) { return $script:dogPoses['lie_00'] }
+            if ($t -lt 15 -and $script:dogPoses.ContainsKey('sidesleep_00')) { return $script:dogPoses['sidesleep_00'] }
+            if ($t -lt 130) {
+                if ((([int][Math]::Floor($t / 9)) % 4) -eq 3) { return $script:dogPoses['belly_00'] }
+                return $script:dogPoses['rub_00']
+            }
+            if ($t -lt 135 -and $script:dogPoses.ContainsKey('sidesleep_00')) { return $script:dogPoses['sidesleep_00'] }
+            if ($t -lt 140) { return $script:dogPoses['lie_00'] }
+            if ($script:dogHappyFrames.Count -eq 3) { return $script:dogHappyFrames[@(0, 1, 2, 1)[$t % 4]] }
+            return $null
         }
         'tilt' {
             if ($t -ge 2 -and $t -lt ($script:dogActLen - 3)) { return $script:dogPoses[$script:dogActPose] }
@@ -6447,6 +6522,10 @@ try {
     $script:planeVX = 0.0
     $script:planeVY = 0.0
     $script:planeTarget = $null
+    $script:heldGrab = $false         # picked up by the scruff (held_00/01)
+    $script:patCount = 0              # pats close together (5 = rolls over belly up)
+    $script:patLastTick = -1000
+    $script:rollRubs = 0              # belly rubs while rolled over
     $script:planeTurning = $false     # turning round (eases off, nose up, then flies back the other way)
     $script:planeTurnAfter = 0.0      # no second turn for a moment after one (planeTime)
     $script:planeLandY = 0.0
@@ -7559,7 +7638,16 @@ try {
                 Set-Bubble '汪！抓住飛機了～'
             } else {
                 $script:dogAct = ''
-                Set-Bubble '汪！放旺旺下來～'
+                Set-Bubble ([string](@('汪！放旺旺下來～', '咦？我飛起來了！', '腳腳踩不到地～', '要帶我去哪裡？')[$script:rng.Next(0, 4)]))
+                if (Test-HeldFrames) {
+                    # Held by the scruff: the window moves so the scruff is right under the pointer.
+                    $go = Get-HeldGrabOffset
+                    $script:heldGrab = $true
+                    $script:dragStart = $current
+                    $script:formStart = [System.Drawing.Point]::new([int]($current.X - [double]$go[0]), [int]($current.Y - [double]$go[1]))
+                    $dx = 0
+                    $dy = 0
+                }
             }
         }
         $script:dragMoved = $true
@@ -7576,6 +7664,12 @@ try {
         $moved = $script:dragMoved
         $script:isDragging = $false
         $script:dragMoved = $false
+        if ($script:heldGrab) {
+            # Let go of the scruff: back on its feet about where its paws were dangling.
+            $script:heldGrab = $false
+            $script:baseLocation = [System.Drawing.Point]::new($script:baseLocation.X, [int]($script:baseLocation.Y + $script:form.Height * 60.0 / 768.0))
+            $script:form.Location = $script:baseLocation
+        }
         if (-not $wasDragging) { return }
         # A click (or picking it up) while the alarm is barking stops the alarm.
         $stoppedAlarm = $false
@@ -7656,6 +7750,11 @@ try {
             if ($script:dogAct -eq 'jerky') { Set-Bubble '吃肉乾中～等我吃完！' } else { Set-Bubble '等等～我要去吃肉乾！' }
             return
         }
+        if ($script:dogAct -eq 'rollover') {
+            # Belly up after lots of pats: a click is a belly rub (wriggles longer).
+            Invoke-RolloverRub
+            return
+        }
         if ($script:dogAct -eq 'bath') {
             # In the bath: a click does not stop it halfway.
             if ($script:dogActTick -lt 120) { Set-Bubble '洗澎澎中～等我洗好！' } else { Set-Bubble '快好了～再等一下！' }
@@ -7689,6 +7788,7 @@ try {
             return
         }
         $script:lastClickPat = $true
+        if (Add-DogPat) { return }
         # A click is a pat: a happy hop and a fast tail wag.
         $script:dogAct = ''
         $script:actionMode = 'happy'
@@ -7830,7 +7930,7 @@ try {
 
             # 3) Actions: tilting, sniffing, shaking, lying, sleeping, petting
             # A pat or a bark takes over from a small action (not from sleeping or petting).
-            if ($script:dogAct -ne '' -and $script:dogAct -ne 'sleep' -and $script:dogAct -ne 'pet' -and $script:dogAct -ne 'headpat' -and $script:dogAct -ne 'plane' -and $script:dogAct -ne 'bath' -and $script:actionMode -ne 'idle') { $script:dogAct = '' }
+            if ($script:dogAct -ne '' -and $script:dogAct -ne 'sleep' -and $script:dogAct -ne 'pet' -and $script:dogAct -ne 'headpat' -and $script:dogAct -ne 'plane' -and $script:dogAct -ne 'bath' -and $script:dogAct -ne 'rollover' -and $script:actionMode -ne 'idle') { $script:dogAct = '' }
             # 飛行模式: back in the air after anything else it did.
             if ($script:flyMode -and $script:dogAct -eq '' -and -not $script:isDragging -and $script:actionMode -eq 'idle') {
                 if ($script:planeReady) { Start-PlaneFlight 'cruise' '' } else { $script:flyMode = $false; try { $script:miFly.Checked = $false } catch { } }
@@ -7840,6 +7940,16 @@ try {
                 $t = $script:dogActTick
                 if ($script:dogSounds) { try { Invoke-ActSound $t } catch { } }
                 switch ($script:dogAct) {
+                    'rollover' {
+                        $xOffset = 0
+                        $yOffset = 0
+                        if ($t -ge 15 -and $t -lt 130 -and (([int][Math]::Floor($t / 9)) % 4) -ne 3) {
+                            $xOffset = [int]([Math]::Sin($t / 1.4) * 4)
+                            $yOffset = [int]([Math]::Abs([Math]::Sin($t / 2.2)) * -3)
+                        }
+                        if ($t -ge 140) { $yOffset = [int]([Math]::Abs([Math]::Sin(($t - 140) / 1.1)) * -12) }
+                        if ($t -eq 140) { Set-Bubble ([string](@('好舒服～謝謝你！', '汪！最喜歡你了～♥', '嘿嘿～還要摸喔！')[$script:rng.Next(0, 3)])) }
+                    }
                     'bath' {
                         $xOffset = 0
                         $yOffset = 0
@@ -8266,10 +8376,10 @@ try {
             }
             if ($script:hovering -and -not $script:isDragging -and -not $menuOpen) {
                 $script:hoverTicks++
-                $petOk = (-not $script:dogSleeping -and $script:dogAct -ne 'eat' -and $script:dogAct -ne 'drink' -and $script:dogAct -ne 'fling' -and $script:dogAct -ne 'tease' -and $script:dogAct -ne 'fetch' -and $script:dogAct -ne 'jerky' -and $script:dogAct -ne 'snatch' -and $script:dogAct -ne 'burst' -and $script:dogAct -ne 'plane' -and $script:dogAct -ne 'bath' -and -not $script:alarmRinging)
+                $petOk = (-not $script:dogSleeping -and $script:dogAct -ne 'eat' -and $script:dogAct -ne 'drink' -and $script:dogAct -ne 'fling' -and $script:dogAct -ne 'tease' -and $script:dogAct -ne 'fetch' -and $script:dogAct -ne 'jerky' -and $script:dogAct -ne 'snatch' -and $script:dogAct -ne 'burst' -and $script:dogAct -ne 'plane' -and $script:dogAct -ne 'bath' -and $script:dogAct -ne 'rollover' -and -not $script:alarmRinging)
                 if ($petOk -and $script:headPatEnabled -and $script:hoverTicks -ge 14 -and $script:dogAct -ne 'headpat' -and $script:dogAct -ne 'pet' -and $script:actionMode -eq 'idle' -and (Test-PointerOnHead)) {
-                    Start-DogAction 'headpat' '*'
-                } elseif ($script:hoverTicks -eq 25 -and $petOk -and $script:dogAct -ne 'headpat') { Start-DogAction 'pet' '*' }
+                    if (-not (Add-DogPat)) { Start-DogAction 'headpat' '*' }
+                } elseif ($script:hoverTicks -eq 25 -and $petOk -and $script:dogAct -ne 'headpat') { if (-not (Add-DogPat)) { Start-DogAction 'pet' '*' } }
             }
             # 3b) Teasing: the mouse pointer swinging quickly left and right in front of the dachshund
             if ($script:teaseEnabled -and -not $script:isDragging -and -not $menuOpen) {
