@@ -191,7 +191,7 @@ if (-not [string]::IsNullOrEmpty($UpdateMode)) {
     }
     exit 0
 }
-$script:appVersion = 'V1.36.0'
+$script:appVersion = 'V1.36.1'
 $script:appTitle = '臘腸狗桌寵 ' + $script:appVersion + '（旺旺）'
 try { $Host.UI.RawUI.WindowTitle = '旺旺（臘腸狗桌寵）- 關閉這個視窗會結束旺旺' } catch { }
 Add-Type -AssemblyName System.Windows.Forms
@@ -6152,10 +6152,11 @@ function Test-HeldFrames {
 
 function Get-HeldGrabOffset {
     # Where the scruff is in the window (the point under the mouse pointer while it hangs): @(x, y).
+    # The back of the neck, just behind and below the ear - the hand pointer there never covers the face.
     $k = [double]$script:form.Width / 768.0
-    $gx = 406.0
+    $gx = 325.0
     if ($script:facingLeft) { $gx = 768.0 - $gx }
-    return @(($gx * $k), (122.0 * $k))
+    return @(($gx * $k), (245.0 * $k))
 }
 
 function Get-DogFramePath {
