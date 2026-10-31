@@ -191,7 +191,7 @@ if (-not [string]::IsNullOrEmpty($UpdateMode)) {
     }
     exit 0
 }
-$script:appVersion = 'V1.36.1'
+$script:appVersion = 'V1.37.0'
 $script:appTitle = '臘腸狗桌寵 ' + $script:appVersion + '（旺旺）'
 try { $Host.UI.RawUI.WindowTitle = '旺旺（臘腸狗桌寵）- 關閉這個視窗會結束旺旺' } catch { }
 Add-Type -AssemblyName System.Windows.Forms
@@ -6154,9 +6154,10 @@ function Get-HeldGrabOffset {
     # Where the scruff is in the window (the point under the mouse pointer while it hangs): @(x, y).
     # The back of the neck, just behind and below the ear - the hand pointer there never covers the face.
     $k = [double]$script:form.Width / 768.0
-    $gx = 325.0
+    # (The held pictures leave room above the head for hats, so the dog hangs a little lower in the window.)
+    $gx = 336.0
     if ($script:facingLeft) { $gx = 768.0 - $gx }
-    return @(($gx * $k), (245.0 * $k))
+    return @(($gx * $k), (339.0 * $k))
 }
 
 function Get-DogFramePath {
@@ -7668,7 +7669,7 @@ try {
         if ($script:heldGrab) {
             # Let go of the scruff: back on its feet about where its paws were dangling.
             $script:heldGrab = $false
-            $script:baseLocation = [System.Drawing.Point]::new($script:baseLocation.X, [int]($script:baseLocation.Y + $script:form.Height * 60.0 / 768.0))
+            $script:baseLocation = [System.Drawing.Point]::new($script:baseLocation.X, [int]($script:baseLocation.Y + $script:form.Height * 75.0 / 768.0))
             $script:form.Location = $script:baseLocation
         }
         if (-not $wasDragging) { return }
