@@ -191,7 +191,7 @@ if (-not [string]::IsNullOrEmpty($UpdateMode)) {
     }
     exit 0
 }
-$script:appVersion = 'V1.39.0'
+$script:appVersion = 'V1.40.0'
 $script:appTitle = '臘腸狗桌寵 ' + $script:appVersion + '（旺旺）'
 try { $Host.UI.RawUI.WindowTitle = '旺旺（臘腸狗桌寵）- 關閉這個視窗會結束旺旺' } catch { }
 Add-Type -AssemblyName System.Windows.Forms
@@ -1903,9 +1903,10 @@ function Import-DogPictures {
         $pp = Get-OutfitPicture ('dachshund_3d_' + $pn + '.png')
         if ($null -ne $pp) { $script:dogPoses[$pn] = $pp }
     }
-    # Picked up by the scruff (held_00/01, the legs kicking): the outfit's own pictures, or the plain ones without
-    # clothes; otherwise it paddles its legs with the walking pictures as before.
-    foreach ($hn in @('held_00', 'held_01')) {
+    # Picked up by the scruff: the outfit's own pictures, or the plain ones without clothes; otherwise it paddles its
+    # legs with the walking pictures as before. held_00..05 = the angry barking set (V1.40.0: barks, shakes its head,
+    # blinks); an outfit with only held_00/01 still has the older two kicking pictures.
+    foreach ($hn in @('held_00', 'held_01', 'held_02', 'held_03', 'held_04', 'held_05')) {
         $hp = $null
         if ([string]::IsNullOrEmpty($script:outfitDir)) { $hp = Join-Path $PSScriptRoot ('dachshund_3d_' + $hn + '.png') } else { $hp = Join-Path $script:outfitDir ('dachshund_3d_' + $hn + '.png') }
         if (Test-Path -LiteralPath $hp) { $script:dogPoses[$hn] = $hp }
@@ -6150,14 +6151,46 @@ function Test-HeldFrames {
     return ($script:dogPoses.ContainsKey('held_00') -and $script:dogPoses.ContainsKey('held_01'))
 }
 
+function Test-HeldAngry {
+    # The angry barking set (held_00..05): hangs diagonally, barks, shakes its head and blinks.
+    foreach ($hn in @('held_00', 'held_01', 'held_02', 'held_03', 'held_04', 'held_05')) {
+        if (-not $script:dogPoses.ContainsKey($hn)) { return $false }
+    }
+    return $true
+}
+
+function Get-HeldAngryFrame {
+    # The angry loop: woof, shut, wuf, shut, shake left/right twice, shut, blink, shut (about 1.9 s), barking now and then.
+    $seq = @(@(0, 220), @(1, 150), @(2, 200), @(1, 150), @(3, 130), @(4, 130), @(3, 130), @(4, 130), @(1, 300), @(5, 130), @(1, 260))
+    $now = [Environment]::TickCount
+    $ms = [int](($now - $script:heldStartMs) % 1930)
+    if ($ms -lt 0) { $ms = 0 }
+    $idx = 1
+    foreach ($e in $seq) {
+        if ($ms -lt [int]$e[1]) { $idx = [int]$e[0]; break }
+        $ms -= [int]$e[1]
+    }
+    if ($script:autoBarkSound -and ($now - $script:heldNextBarkMs) -ge 0) {
+        try { [void](Invoke-BarkSound $false) } catch { }
+        $script:heldNextBarkMs = $now + [int]($script:barkSeconds * 1000) + 2500
+    }
+    return $script:dogPoses[('held_0' + $idx)]
+}
+
 function Get-HeldGrabOffset {
     # Where the scruff is in the window (the point under the mouse pointer while it hangs): @(x, y).
     # The back of the neck, just behind and below the ear - the hand pointer there never covers the face.
     $k = [double]$script:form.Width / 768.0
     # (The held pictures leave room above the head for hats, so the dog hangs a little lower in the window.)
     $gx = 336.0
+    $gy = 339.0
+    if (Test-HeldAngry) {
+        # The angry set hangs diagonally, head at the upper right: the scruff is behind the ear.
+        $gx = 465.0
+        $gy = 225.0
+    }
     if ($script:facingLeft) { $gx = 768.0 - $gx }
-    return @(($gx * $k), (339.0 * $k))
+    return @(($gx * $k), ($gy * $k))
 }
 
 function Get-DogFramePath {
@@ -6167,7 +6200,8 @@ function Get-DogFramePath {
         # Picked up: the legs paddle in the air (in the plane: still the plane).
         if ($script:dogAct -eq 'plane') { return Get-PlaneFramePath }
         if (Test-HeldFrames) {
-            # Hanging by the scruff, the little legs kicking in the air.
+            # Hanging by the scruff, the little legs kicking in the air (angry set: barking, shaking its head, blinking).
+            if (Test-HeldAngry) { return Get-HeldAngryFrame }
             if (([int][Math]::Floor($script:clockTick / 4) % 2) -eq 0) { return $script:dogPoses['held_00'] }
             return $script:dogPoses['held_01']
         }
@@ -6524,7 +6558,9 @@ try {
     $script:planeVX = 0.0
     $script:planeVY = 0.0
     $script:planeTarget = $null
-    $script:heldGrab = $false         # picked up by the scruff (held_00/01)
+    $script:heldGrab = $false         # picked up by the scruff (held_00/01, or the angry set held_00..05)
+    $script:heldStartMs = 0           # when it was picked up (the angry loop and its barks count from here)
+    $script:heldNextBarkMs = 0
     $script:patCount = 0              # pats close together (5 = rolls over belly up)
     $script:patLastTick = -1000
     $script:rollRubs = 0              # belly rubs while rolled over
@@ -7640,7 +7676,13 @@ try {
                 Set-Bubble '汪！抓住飛機了～'
             } else {
                 $script:dogAct = ''
-                Set-Bubble ([string](@('汪！放旺旺下來～', '咦？我飛起來了！', '腳腳踩不到地～', '要帶我去哪裡？')[$script:rng.Next(0, 4)]))
+                if (Test-HeldAngry) {
+                    Set-Bubble ([string](@('汪汪！放我下來！', '嗚～汪！不要抓後頸啦！', '汪！旺旺生氣了喔！', '汪汪汪！腳腳踩不到地！')[$script:rng.Next(0, 4)]))
+                    $script:heldStartMs = [Environment]::TickCount
+                    $script:heldNextBarkMs = $script:heldStartMs
+                } else {
+                    Set-Bubble ([string](@('汪！放旺旺下來～', '咦？我飛起來了！', '腳腳踩不到地～', '要帶我去哪裡？')[$script:rng.Next(0, 4)]))
+                }
                 if (Test-HeldFrames) {
                     # Held by the scruff: the window moves so the scruff is right under the pointer.
                     $go = Get-HeldGrabOffset
@@ -7669,7 +7711,9 @@ try {
         if ($script:heldGrab) {
             # Let go of the scruff: back on its feet about where its paws were dangling.
             $script:heldGrab = $false
-            $script:baseLocation = [System.Drawing.Point]::new($script:baseLocation.X, [int]($script:baseLocation.Y + $script:form.Height * 75.0 / 768.0))
+            $drop = 75.0
+            if (Test-HeldAngry) { $drop = 60.0 }
+            $script:baseLocation = [System.Drawing.Point]::new($script:baseLocation.X, [int]($script:baseLocation.Y + $script:form.Height * $drop / 768.0))
             $script:form.Location = $script:baseLocation
         }
         if (-not $wasDragging) { return }
